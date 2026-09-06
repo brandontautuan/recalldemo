@@ -222,6 +222,19 @@ test('creates a meeting with title, type, bot ID, and initial lifecycle state', 
   assert.equal(meeting.statusHistory[0].status, 'created');
 });
 
+test('future Recall bot creation enters the canonical scheduled state', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'scheduled-meeting-test-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = new JsonStore(path.join(directory, 'store.json'));
+  const config = createConfig({ RECALL_REGION: 'us-west-2', RECALL_API_KEY: 'token', RECALL_WEBHOOK_VERIFICATION_SECRET: secret, PUBLIC_API_BASE_URL: 'https://recall-demo.ngrok.app' });
+  const app = createApp({ config, store, recall: { async createBot() { return { id: 'bot-future' }; } } });
+  const response = await invoke(app, 'POST', '/api/meetings', JSON.stringify({ meetingUrl: 'https://meet.google.com/abc-defg-hij', joinAt: '2099-01-01T00:00:00.000Z' }));
+  const meeting = JSON.parse(response.body);
+  assert.equal(response.statusCode, 201);
+  assert.equal(meeting.status, 'bot_scheduled');
+  assert.equal(meeting.statusHistory.at(-1).eventType, 'app.bot_scheduled');
+});
+
 test('rejects unsupported meeting URLs before calling Recall', async () => {
   const config = createConfig({ RECALL_REGION: 'us-west-2', RECALL_API_KEY: 'token', RECALL_WEBHOOK_VERIFICATION_SECRET: secret, PUBLIC_API_BASE_URL: 'https://recall-demo.ngrok.app' });
   const store = new MemoryStore();
@@ -297,10 +310,11 @@ test('reconciles missed lifecycle events and a completed transcript from Retriev
   const app = createApp({ config, recall, store, logger: { error() {} } });
   const first = await invoke(app, 'POST', '/api/meetings/meeting-1/reconcile');
   assert.equal(first.statusCode, 200);
-  assert.deepEqual(store.getMeeting('meeting-1').statusHistory.map((entry) => entry.status), ['joining', 'recording', 'complete']);
+  assert.deepEqual(store.getMeeting('meeting-1').statusHistory.map((entry) => entry.status), ['joining', 'recording', 'transcript_processing', 'completed']);
+  assert.equal(store.getMeeting('meeting-1').status, 'completed');
   assert.equal(store.findTranscriptByMeetingId('meeting-1').analytics.totalSpeakingSeconds, 2);
   await invoke(app, 'POST', '/api/meetings/meeting-1/reconcile');
-  assert.equal(store.getMeeting('meeting-1').statusHistory.length, 3);
+  assert.equal(store.getMeeting('meeting-1').statusHistory.length, 4);
 });
 
 test('allows failed transcript download processing to be retried safely', async (context) => {

@@ -50,6 +50,14 @@ test('dashboard exposes explicit preview, confirmation-only analysis, and separa
   assert.doesNotMatch(indexHtml, /setInterval\([^]*\/analyze/);
 });
 
+test('mock-mode UI exposes a confirmed fixture reset and explicit privacy boundaries', () => {
+  assert.match(indexHtml, /id="reset-demo"/);
+  assert.match(indexHtml, /Reset only the clearly labeled demo fixture/);
+  assert.match(indexHtml, /stores the normalized transcript locally, not recording media/);
+  assert.match(indexHtml, /sent to Groq only after you explicitly confirm analysis/);
+  assert.match(indexHtml, /Canonical application JSON \(recommended\)/);
+});
+
 test('application serves the browser context-state module as JavaScript', async () => {
   const app = createApp({
     config: createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true' }),

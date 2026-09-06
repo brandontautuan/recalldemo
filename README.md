@@ -65,6 +65,10 @@ This application is pinned to the `Sandbox` workspace in Recall's `us-west-2` re
 
 Webhook requests are verified against their exact raw body and deduplicated by delivery ID. Bot status codes are treated as extensible. A later `bot.done` event does not erase an earlier fatal state.
 
+The dashboard uses eight canonical meeting states: `created`, `bot_scheduled`, `joining`, `in_call`, `recording`, `transcript_processing`, `completed`, and `failed`. Waiting-room events map to `joining`; permission and non-recording call events map to `in_call`; call-ended and `bot.done` events map to `transcript_processing`. A meeting becomes `completed` only after a normalized transcript is stored. Raw Recall event types, codes, sub-codes, messages, and timestamps remain in lifecycle history. Later authoritative states may skip missing intermediate states, but delayed older events cannot move the displayed state backward. `completed` and `failed` are terminal per lifecycle attempt.
+
+The backend derives the valid recovery controls returned to the dashboard. Active or failed bot states may be reconciled explicitly. Only transcript-processing failures expose **Retry processing**, which starts a numbered recovery attempt and reuses existing Recall artifacts. Ambiguous bot-creation failures are not retried automatically or in place; the UI tells the user to create a new meeting request. Analysis failures remain separate from meeting completion and every Groq retry requires another explicit click and confirmation.
+
 The active workspace webhook is configured for `bot.joining_call`, `bot.in_waiting_room`, `bot.in_call_not_recording`, `bot.recording_permission_allowed`, `bot.recording_permission_denied`, `bot.in_call_recording`, `bot.call_ended`, `bot.done`, `bot.fatal`, the four breakout-room lifecycle events, `recording.done`, `recording.failed`, `transcript.done`, and `transcript.failed`.
 
 ## Configuration
@@ -169,7 +173,7 @@ Set `MOCK_MODE=true` and keep `RECALL_REGION=us-west-2`. Recall credentials and 
 npm start
 ```
 
-The dashboard displays a visible `MOCK MODE` badge and a fixture architecture review with lifecycle history, three participants, normalized transcript timestamps, deterministic analytics, and clearly labeled fixture ADR, action-item, bug, and risk proposals. This supports the complete review and export flow without a live meeting or Groq request. Approve one or more fixtures to reveal the export panel. Mock mode makes no live Recall transcript or calendar calls. It also does not run Groq on startup; clicking the analysis button is still required and requires `GROQ_API_KEY`.
+The dashboard displays a visible `MOCK MODE` badge and a fixture architecture review with lifecycle history, three participants, normalized transcript timestamps, deterministic analytics, and clearly labeled fixture ADR, action-item, bug, and risk proposals. This supports the complete review and export flow without a live meeting or Groq request. Approve one or more fixtures to reveal the export panel. Use **Reset demo** and confirm the prompt to restore only this named fixture, including its initial proposals, while preserving live records and seeded project context. Repeating reset produces the same fixture and makes no external calls. Mock mode makes no live Recall transcript or calendar calls. It also does not run Groq on startup; clicking the analysis button is still required and requires `GROQ_API_KEY`.
 
 ## Manual Groq analysis
 
@@ -197,6 +201,7 @@ The backend rejects empty or duplicate selections, artifacts outside the meeting
 
 ## Application API
 
+- `POST /api/demo/reset` is available only in mock mode, accepts no fields, and deterministically restores only the labeled fixture without external calls.
 - `POST /api/meetings` creates and persists a meeting, then creates a Recall bot.
 - `GET /api/meetings` lists locally stored meetings.
 - `GET /api/meetings/:id` returns one meeting and its lifecycle state.
@@ -226,10 +231,11 @@ Calendar is a secondary path. Only future, non-deleted events with a meeting URL
 
 ```sh
 npm test
+npm run test:golden
 npm run smoke
 ```
 
-`npm test` uses deterministic mocked Recall and Groq responses and does not require a live account. It covers migrations, seed validation, idempotent ingestion, deterministic source ordering, lexical relevance, character-budget omissions, preview integrity, single-use analysis binding, context-source validation, browser preview state and invalidation, separate artifact and export provenance, project APIs, artifact validation, review actions, audit events, reanalysis preservation, canonical/Linear/Jira mappings, export eligibility, stale versions, and safe filenames. It also asserts that context previews, transcript webhooks, review actions, and exports never make external calls. `npm run smoke` loads `.env`, constructs the production entrypoint, and exercises `GET /` without binding a network socket. Neither command sends a live Groq request.
+`npm test` uses deterministic mocked Recall and Groq responses and does not require a live account. It covers the canonical state table, forward-only and skipped transitions, unknown Recall states, terminal failures, explicit recovery attempts, migrations, seed validation, idempotent ingestion, deterministic source ordering, lexical relevance, character-budget omissions, preview integrity, single-use analysis binding, context-source validation, browser preview state and invalidation, separate artifact and export provenance, project APIs, fixture-only demo reset, artifact validation, review actions, audit events, reanalysis preservation, canonical/Linear/Jira mappings, export eligibility, stale versions, and safe filenames. It also asserts that context previews, transcript webhooks, review actions, exports, and demo reset never make external calls. `npm run test:golden` runs the single mocked integration path from meeting creation through signed lifecycle/transcript webhooks, normalization, explicit analysis, approval, and canonical export; it proves Groq is called exactly once and only by the manual analysis request. `npm run smoke` loads `.env`, constructs the production entrypoint, and exercises `GET /` without binding a network socket. None of these commands sends a live Recall or Groq request.
 
 The Recall workspace, region, purpose-named API key metadata, webhook destination, and subscriptions have been verified. With the configured ngrok route active, a signed Recall `bot.joining_call` test delivery reached the application and was durably recorded with processing status `complete`. The verification tunnel was stopped afterward; restart the app and tunnel when receiving live webhooks locally.
 

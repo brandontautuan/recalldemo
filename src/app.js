@@ -9,6 +9,7 @@ import { GroqBusyError, GroqConfigurationError, GroqRateLimitError } from './gro
 import { createArtifactExport, ExportValidationError, ExportVersionConflictError, safeExportFilename } from './export.js';
 import { buildContextSelection, projectContextHash } from './context-selector.js';
 import { ContextSelectionIntegrityError } from './context-db.js';
+import { mockFixture } from './mock-data.js';
 
 const publicDir = path.resolve('public');
 const titleOf = (event) => event.raw?.summary ?? event.raw?.title ?? event.title ?? '';
@@ -35,18 +36,32 @@ const validMeetingUrl = (value) => {
 
 export function createApp({ config, recall, store, analysis, contextStore = null, logger = console }) {
   const meetingForBot = (botId) => botId ? store.findMeetingByBotId(botId) : null;
+  const setMeetingState = (meeting, state, details = {}) => typeof store.setMeetingState === 'function'
+    ? store.setMeetingState(meeting.id, state, details)
+    : store.updateMeeting(meeting.id, {
+      status: state,
+      processingStatus: state === 'failed' ? 'failed' : meeting.processingStatus,
+      error: state === 'failed' ? { code: details.code, subCode: details.subCode ?? null, message: details.message ?? null } : null,
+    });
 
   const requestTranscript = async (recordingId, meeting) => {
     const claimKey = `transcript:${recordingId}`;
     if (!store.claim(claimKey)) return false;
-    if (meeting) store.updateMeeting(meeting.id, { transcriptStatus: 'creating', processingStatus: 'transcribing', error: null });
+    if (meeting) {
+      const retryableFailure = ['transcript_create_failed', 'transcript_download_or_parse_failed', 'transcript_failed', 'transcript_retry_failed'].includes(meeting.error?.code);
+      setMeetingState(meeting, 'transcript_processing', { eventType: 'app.transcript_processing', code: 'transcript_processing', allowRecovery: meeting.status === 'failed' && retryableFailure });
+      store.updateMeeting(meeting.id, { transcriptStatus: 'creating', processingStatus: 'transcribing', error: null });
+    }
     try {
       await recall.createTranscript(recordingId);
       if (meeting) store.updateMeeting(meeting.id, { transcriptStatus: 'pending', processingStatus: 'awaiting_transcript' });
       return true;
     } catch (error) {
       store.releaseClaim(claimKey);
-      if (meeting) store.updateMeeting(meeting.id, { transcriptStatus: 'failed', processingStatus: 'failed', error: { code: 'transcript_create_failed', subCode: null } });
+      if (meeting) {
+        store.updateMeeting(meeting.id, { transcriptStatus: 'failed' });
+        setMeetingState(meeting, 'failed', { eventType: 'app.transcript_failed', code: 'transcript_create_failed', message: 'Recall could not start transcript processing.' });
+      }
       throw error;
     }
   };
@@ -80,12 +95,16 @@ export function createApp({ config, recall, store, analysis, contextStore = null
         participants: analytics.participants.map(({ speakerId, speakerName }) => ({ id: speakerId, name: speakerName })),
         error: null,
       });
+      if (meeting) setMeetingState(meeting, 'completed', { eventType: 'app.transcript_ready', code: 'transcript_ready' });
       return transcript;
     } catch (error) {
       store.releaseClaim(claimKey);
       logger.error('transcript-processing-failed', { transcriptId });
       store.saveTranscript(transcriptId, { id: transcriptId, meetingId: meeting?.id ?? existing?.meetingId ?? null, recordingId, status: 'failed', failureCode: 'transcript_download_or_parse_failed', receivedAt: new Date().toISOString() });
-      if (meeting) store.updateMeeting(meeting.id, { transcriptStatus: 'failed', processingStatus: 'failed', error: { code: 'transcript_download_or_parse_failed', subCode: null } });
+      if (meeting) {
+        store.updateMeeting(meeting.id, { transcriptStatus: 'failed' });
+        setMeetingState(meeting, 'failed', { eventType: 'app.transcript_failed', code: 'transcript_download_or_parse_failed', message: 'The transcript could not be retrieved or normalized.' });
+      }
       throw error;
     }
   };
@@ -117,7 +136,10 @@ export function createApp({ config, recall, store, analysis, contextStore = null
     } else if (type === 'recording.failed') {
       const meeting = meetingForBot(data.bot?.id);
       const failure = data.data ?? data.status ?? {};
-      if (meeting) store.updateMeeting(meeting.id, { transcriptStatus: 'unavailable', processingStatus: 'failed', error: { code: 'recording_failed', subCode: failure.sub_code ?? null } });
+      if (meeting) {
+        store.updateMeeting(meeting.id, { transcriptStatus: 'unavailable' });
+        setMeetingState(meeting, 'failed', { eventType: 'app.recording_failed', code: 'recording_failed', subCode: failure.sub_code ?? null, message: 'Recall did not make a recording available.' });
+      }
     } else if (type === 'transcript.done') {
       const transcriptId = data.transcript?.id;
       if (transcriptId) await completeTranscript({ transcriptId, recordingId: data.recording?.id ?? null, botId: data.bot?.id ?? null });
@@ -125,7 +147,10 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       const id = data.transcript?.id ?? crypto.randomUUID();
       store.saveTranscript(id, { id, status: 'failed', failureCode: data.status?.sub_code ?? 'unknown', receivedAt: new Date().toISOString() });
       const meeting = data.bot?.id ? store.findMeetingByBotId(data.bot.id) : null;
-      if (meeting) store.updateMeeting(meeting.id, { transcriptStatus: 'failed', processingStatus: 'failed', error: { code: 'transcript_failed', subCode: data.status?.sub_code ?? 'unknown' } });
+      if (meeting) {
+        store.updateMeeting(meeting.id, { transcriptStatus: 'failed' });
+        setMeetingState(meeting, 'failed', { eventType: 'app.transcript_failed', code: 'transcript_failed', subCode: data.status?.sub_code ?? 'unknown', message: 'Recall reported that transcript processing failed.' });
+      }
     } else if (type === 'calendar.sync_events') {
       const calendarId = data.calendar_id;
       if (!calendarId) return;
@@ -149,6 +174,21 @@ export function createApp({ config, recall, store, analysis, contextStore = null
     if (req.method === 'GET' && url.pathname === '/context-ui-state.js') { res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); return res.end(fs.readFileSync(path.join(publicDir, 'context-ui-state.js'))); }
     if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(res, 200, { ...store.dashboard(), mockMode: config.mockMode });
     if (req.method === 'GET' && url.pathname === '/api/meetings') return json(res, 200, store.dashboard().meetings);
+    if (req.method === 'POST' && url.pathname === '/api/demo/reset') {
+      if (!config.mockMode) return json(res, 404, { error: 'Demo reset is available only in mock mode.' });
+      let body = {};
+      try {
+        const rawBody = await readBody(req);
+        body = rawBody ? JSON.parse(rawBody) : {};
+      } catch {
+        return json(res, 400, { error: 'Request body must be valid JSON.' });
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Request body must be a JSON object.' });
+      if (Object.keys(body).length) return json(res, 400, { error: 'Demo reset does not accept fields.' });
+      if (typeof store.resetMock !== 'function') return json(res, 503, { error: 'Demo reset is unavailable.' });
+      store.resetMock(mockFixture);
+      return json(res, 200, { reset: true, ...store.dashboard(), mockMode: true });
+    }
     if (req.method === 'GET' && url.pathname === '/api/projects') {
       if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
       return json(res, 200, { projects: contextStore.listProjects() });
@@ -376,6 +416,9 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       if (!meeting) return json(res, 404, { error: 'Meeting not found.' });
       if (!meeting.botId) return json(res, 409, { error: 'Meeting does not have a Recall bot ID.' });
       try {
+        if (meeting.status === 'failed' && ['transcript_create_failed', 'transcript_download_or_parse_failed', 'transcript_failed', 'transcript_retry_failed'].includes(meeting.error?.code)) {
+          setMeetingState(meeting, 'transcript_processing', { eventType: 'app.transcript_retry_started', code: 'transcript_retry_started', allowRecovery: true });
+        }
         const { bot } = await reconcileMeeting(meeting);
         if (store.findTranscriptByMeetingId(meeting.id)?.status === 'done') return json(res, 200, store.getMeeting(meeting.id));
         const recording = (Array.isArray(bot?.recordings) ? bot.recordings : []).find((item) => typeof item?.id === 'string');
@@ -383,6 +426,7 @@ export function createApp({ config, recall, store, analysis, contextStore = null
         await requestTranscript(recording.id, meeting);
         return json(res, 202, store.getMeeting(meeting.id));
       } catch (error) {
+        setMeetingState(meeting, 'failed', { eventType: 'app.transcript_retry_failed', code: 'transcript_retry_failed', message: 'The processing retry could not retrieve Recall artifacts.' });
         logger.error('meeting-processing-retry-failed', { meetingId: meeting.id });
         return json(res, 502, { error: 'Meeting processing retry failed.' });
       }
@@ -418,10 +462,12 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       });
       try {
         const bot = await recall.createBot({ meetingUrl: meeting.meetingUrl, joinAt: meeting.joinAt, intentId: meeting.id });
-        return json(res, 201, store.updateMeeting(meeting.id, { botId: bot.id, recallBotId: bot.id }));
+        store.updateMeeting(meeting.id, { botId: bot.id, recallBotId: bot.id });
+        if (Date.parse(meeting.joinAt) > Date.now() + 1_000) setMeetingState(meeting, 'bot_scheduled', { eventType: 'app.bot_scheduled', code: 'bot_scheduled' });
+        return json(res, 201, store.getMeeting(meeting.id));
       } catch (error) {
         logger.error('bot-create-failed', { meetingId: meeting.id });
-        return json(res, 502, store.updateMeeting(meeting.id, { status: 'failed', processingStatus: 'failed', error: { code: 'bot_create_failed', message: 'Recall could not schedule this bot.' } }));
+        return json(res, 502, setMeetingState(meeting, 'failed', { eventType: 'app.bot_create_failed', code: 'bot_create_failed', message: 'Recall could not schedule this bot. Create a new meeting request before trying again.' }));
       }
     }
     if (req.method === 'POST' && url.pathname === '/webhooks/recall') {

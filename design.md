@@ -21,6 +21,12 @@ The central product principle is:
 
 After an explicit user request, the analysis runs within defined stages, structured schemas, and validation rules. It is not an open-ended multi-agent loop and must not claim to know information absent from the transcript or supplied project context.
 
+The final product positioning is:
+
+> A human-in-the-loop engineering meeting assistant that uses Recall to capture meetings, normalizes transcripts into reliable evidence, proposes structured engineering artifacts through an explicitly triggered analysis step, and lets users review, approve, and locally export the results without taking external action.
+
+Groq is described throughout the product as a human-triggered analysis step or bounded artifact-extraction service, not as an agent. The product is an evidence-review workflow, not an autonomous project-management agent.
+
 ## 2. Target User
 
 The primary user is an engineering manager, technical project manager, product manager, or software engineer who needs to convert technical meetings into reliable follow-up work.
@@ -144,6 +150,60 @@ Deterministic code validates transcript structure, artifact schemas, evidence re
 ### Human approval and export
 
 Generated artifacts enter a human review queue. A user may edit, approve, reject, or request more information before export. Only approved artifacts may be exported as Linear/Jira-compatible drafts.
+
+## 4.2 Canonical Meeting State Machine
+
+The application should present a small canonical lifecycle while retaining Recall's original event type, status code, sub-code, message, and event time in history for diagnosis. Granular Recall states such as waiting-room and recording-permission events map into the canonical states rather than expanding the user-facing state machine.
+
+The allowed canonical meeting states are:
+
+```text
+created
+bot_scheduled
+joining
+in_call
+recording
+transcript_processing
+completed
+failed
+```
+
+Their meanings are:
+
+| State | Meaning |
+| --- | --- |
+| `created` | The application has validated and persisted the meeting request. |
+| `bot_scheduled` | Recall accepted a future bot join time; immediate joins may skip this state. |
+| `joining` | The bot is attempting to enter the call, including the waiting-room state. |
+| `in_call` | The bot entered the call but is not yet confirmed to be recording. |
+| `recording` | Recall confirmed active recording. |
+| `transcript_processing` | The call or recording ended and transcript creation, retrieval, or normalization is in progress. |
+| `completed` | A normalized transcript is stored and ready for optional manual analysis. |
+| `failed` | The current capture attempt reached a fatal or unrecoverable state. |
+
+Allowed forward transitions are:
+
+```text
+created → bot_scheduled | joining | in_call | recording | transcript_processing | completed | failed
+bot_scheduled → joining | in_call | recording | transcript_processing | completed | failed
+joining → in_call | recording | transcript_processing | completed | failed
+in_call → recording | transcript_processing | completed | failed
+recording → transcript_processing | completed | failed
+transcript_processing → completed | failed
+completed → terminal
+failed → terminal for that capture attempt
+```
+
+The current state may repeat when distinct provider events map to the same canonical state. Some intermediate states may be skipped when Recall delivers a later authoritative event first. Skipping is allowed; regression is not. For example, `recording` may arrive before `joining`, but a later-delivered older `joining` event must be inserted into history without moving the current state backward. A fatal event is sticky for its capture attempt and cannot be hidden by a later `bot.done` delivery.
+
+`completed` and `failed` are terminal meeting-capture states. Manual transcript recovery or a new bot attempt creates a separately recorded retry attempt rather than erasing the terminal history. Artifact analysis has its own state machine:
+
+```text
+not_started → running → completed | failed
+failed → running only through a new explicit user-triggered analysis job
+```
+
+Analysis failure never changes a successfully captured meeting from `completed` to `failed`. The implementation preserves raw event-time history, makes fatal bot events sticky per lifecycle attempt, normalizes the canonical display state, and enforces forward-only transitions.
 
 ## 5. MVP Scope
 
@@ -792,6 +852,22 @@ If context ingestion or retrieval fails, the manual analysis request fails clear
 
 Errors should be logged with enough context to debug them without exposing secrets.
 
+### 15.1 Retry and failure behavior
+
+All retryable failures must have a short user-safe message, a stable internal failure code, and an explicit retry action. Retrying must not silently repeat external work or erase the original attempt.
+
+| Failure | Persisted behavior | User-visible recovery |
+| --- | --- | --- |
+| Recall bot creation fails | Keep the meeting request and record a failed bot-attempt code without guessing whether an ambiguous request succeeded. | Explain that the user must create a new meeting request. Do not expose one-click retry for an ambiguous create operation. |
+| Webhook is duplicated | Deduplicate by verified Recall delivery ID, acknowledge it, and perform no lifecycle or transcript work twice. | No user action; history remains unchanged. |
+| Webhooks arrive out of order | Store valid events in event-time order, preserve raw Recall details, and never regress the canonical current state. Fatal history remains sticky. | Offer `Reconcile status` when the displayed state appears stale. |
+| Transcript creation, download, or normalization fails | Persist a specific transcript failure code, release only the safe processing claim needed for retry, and retain meeting and recording/transcript identifiers. | Show `Retry processing`; reuse Recall's existing artifacts instead of creating a new bot. |
+| Groq times out, is rate-limited, or is unavailable | Mark that manual analysis job failed and keep the completed transcript and previously reviewed artifacts. Respect provider retry timing. | Show a retryable error; another attempt requires a fresh click and confirmation. |
+| Groq returns malformed or schema-invalid output | Persist `invalid_output` with validation issues and do not save or replace proposals from that response. | Explain that extraction failed validation and allow a new explicit attempt. |
+| User retries selected-context analysis | A snapshot linked to an attempted analysis remains single-use, even when the provider fails. Reviewed artifacts remain untouched; only a later valid response may replace unreviewed proposals. | Require a new context preview, show the disclosure again, and require confirmation. |
+
+The UI does not claim that bot creation can be retried in place. Relaunching a failed meeting as a new request is the safe fallback because an ambiguous create request may have succeeded remotely without returning an ID. Transcript processing recovery starts a numbered lifecycle attempt, while status reconciliation and manual analysis use their existing explicit jobs.
+
 ## 16. Mock and Demo Mode
 
 The application must include a mock mode so the end-to-end product can be demonstrated without relying entirely on a live meeting.
@@ -812,6 +888,20 @@ The UI should clearly indicate when mock data is being used.
 
 Live mode must remain the primary documented integration path.
 
+### 16.1 Deterministic demo reset
+
+Mock mode should expose a **Reset demo** action so an evaluator can repeat the golden path without deleting files manually. The reset contract is:
+
+* It is available only when `MOCK_MODE=true`; live mode returns `404` or `403` and shows no reset control.
+* The UI requires confirmation and explains that only labeled fixture state will be replaced.
+* `POST /api/demo/reset` accepts no arbitrary record IDs and resets only the known mock meeting, transcript, analytics, analysis jobs, artifact proposals, and review events.
+* It does not delete live meetings, the project-context corpus, migrations, API keys, or environment files.
+* It reloads the same deterministic fixture IDs and content on every run, making the action idempotent.
+* It performs no Recall, Groq, calendar, Linear, Jira, MCP, or other network call.
+* The response returns the refreshed dashboard model or a success result that the browser follows with `GET /api/dashboard`.
+
+A separate **Load fixture** action is unnecessary if reset safely restores the fixture. The reset endpoint, store behavior, and browser control require deterministic tests.
+
 ## 17. Security and Privacy
 
 * Store Recall API keys only on the backend.
@@ -826,7 +916,20 @@ Live mode must remain the primary documented integration path.
 * Treat seeded context documents and ticket snapshots as untrusted data: they are never instructions, are size-limited, and are not exposed to the browser unless selected for a user-confirmed analysis.
 * Keep project-context database files and seed inputs out of public static directories and do not log their full contents.
 
-## 17.1 Take-Home Context Operations
+### 17.1 Demo privacy and retention policy
+
+This reference application uses a simple, explicit demo-data policy:
+
+* Normalized transcripts, lifecycle history, analysis jobs, artifact proposals, and review events are stored locally in the application's JSON data store until the developer deletes the data. The scoped mock reset replaces only labeled fixture state. There is no automatic retention timer in the take-home.
+* Seeded project context and immutable context selections are stored locally in SQLite. Private `*.local.json` seed overrides and generated database files remain ignored by Git.
+* The application stores recording and transcript identifiers needed for processing but does not download or persist the meeting recording media itself.
+* A normalized transcript is sent to Groq only after the user clicks the analysis action and confirms the disclosure. Transcript completion, webhooks, startup, timers, preview generation, and demo reset never invoke Groq.
+* Recall and Groq API keys and Recall webhook secrets remain server-side environment values and are never returned to browser code.
+* Mock meetings, transcripts, analytics, and artifact proposals are visibly labeled as fixture data.
+* Export is generated locally and never automatically submits to Linear, Jira, Recall, Groq, or another external system.
+* The take-home makes no enterprise retention, encryption, compliance, or deletion-guarantee claim. A production system requires organization-level retention rules, access control, encryption, and auditable deletion.
+
+## 17.2 Take-Home Context Operations
 
 The bounded project-context feature requires the following local operational additions:
 
@@ -860,6 +963,22 @@ The MVP will not include:
 * Production-grade compliance certifications
 * Support for every calendar provider
 * A full project-management replacement
+
+### 18.1 Take-home prioritization and deliberate deferrals
+
+The polished direct-URL demo, canonical export, deterministic project-context snapshot, and golden-path reliability test take priority over feature breadth. The following work must not delay that path:
+
+* Full Google Calendar OAuth and scheduling UI.
+* Additional live repository, documentation, Jira, Linear, MCP, embedding, or autonomous-agent retrieval.
+* Production queue, worker, scheduler, or distributed rate-limiter infrastructure.
+* Multi-user authentication, conflict resolution, permissions, and actor identity.
+* Additional lifecycle analytics beyond the canonical state and existing descriptive talk-time metrics.
+* Further complexity in proposal replacement and version semantics beyond preserving reviewed artifacts.
+* Additional export formats or direct external submission.
+
+Canonical JSON is the primary take-home export and should receive the end-to-end acceptance test. The already implemented Linear and Jira-compatible drafts may remain as documented extensions, but they should not expand or block the main demo.
+
+The project-context feature remains local, bounded, deterministic, and deliberately seeded. It must not become live GitHub, Jira, Linear, MCP, embedding, or autonomous retrieval for this scope.
 
 ## 19. Implementation Order
 
@@ -922,15 +1041,17 @@ The MVP will not include:
 
 ### Phase 7: Export
 
-* Generate Linear/Jira-compatible JSON.
+* Generate canonical approved-artifact JSON as the primary take-home export.
 * Add copy-to-clipboard and download functionality.
 * Document how external systems could consume the payload.
 * Export only user-approved artifacts; do not call external ticket APIs.
 * Require explicit artifact IDs and current versions so stale or cross-meeting selections cannot be exported.
 * Preserve meeting metadata, approval state, provenance, and transcript evidence in the canonical export.
-* Emit explicit mapping hints instead of inventing workspace-specific Linear or Jira identifiers.
+* Keep the existing Linear and Jira-compatible drafts as secondary extensions and emit mapping hints instead of inventing workspace-specific identifiers.
 
 ### Phase 8: Calendar Extension
+
+Deferred until after the complete direct-URL golden path and demo reset are verified.
 
 * Connect Google Calendar.
 * Implement `[recall]` opt-in filtering.
@@ -947,6 +1068,56 @@ The MVP will not include:
 * Add mock mode instructions.
 * Run tests, type checks, formatting, and linting.
 * Perform a complete manual demo.
+
+### Phase 10: Canonical Lifecycle and Recovery Contract — Implemented
+
+* Add a single canonical meeting-state mapper implementing section 4.2 while preserving raw Recall events.
+* Enforce allowed forward transitions and skipped-state behavior without regressing on out-of-order delivery.
+* Keep `completed` and `failed` terminal per capture attempt and represent manual retries as separate attempts or jobs.
+* Render stable failure codes, user-safe messages, and only the recovery actions valid for the current failure.
+* Add transition-table tests, including duplicate, out-of-order, skipped-state, fatal-then-done, and reconciliation cases.
+
+### Phase 11: Deterministic Demo Reset — Implemented
+
+* Add the mock-only `POST /api/demo/reset` endpoint and narrowly scoped store reset operation.
+* Add the confirmed **Reset demo** control and restore the known fixture to its initial reviewable state.
+* Prove idempotency, fixture-only deletion, live-mode denial, and zero external calls.
+* Update mock-mode documentation with the repeatable evaluator flow.
+
+### Phase 12: Golden-Path Integration Test — Implemented
+
+Add one headless integration test or documented test script using mocked Recall and Groq boundaries:
+
+```text
+create meeting
+  → receive signed lifecycle webhook
+  → receive signed transcript webhook
+  → retrieve and normalize transcript
+  → explicitly request analysis
+  → validate and persist artifacts
+  → approve one artifact
+  → export canonical JSON
+```
+
+The test must assert that Groq is not called by meeting creation or either webhook, is called exactly once by the explicit analysis request, and that the exported evidence resolves to the authoritative normalized transcript.
+
+### Phase 13: Final Demo Polish and Acceptance — Engineering Complete; Live Acceptance Pending
+
+* Make canonical JSON the default and documented primary export without removing already working secondary formats.
+* Run the complete mock golden path repeatedly using **Reset demo**.
+* Run one live Recall direct-URL meeting from bot creation through normalized transcript readiness.
+* Run one explicitly confirmed Groq extraction and locally export one approved artifact.
+* Verify retryable errors, disclosure wording, privacy wording, fixture labels, and absence of automatic external actions.
+* Keep Calendar OAuth and production-scale infrastructure deferred.
+
+Phases 10–12 and the Phase 13 engineering polish are implemented. Phase 13 now stops at the live-verification boundary: a user must join and consent in a disposable meeting, explicitly confirm the one live Groq request, and judge the rendered browser flow. Phase 8 remains deferred.
+
+| Remaining phase | Depends on | Direct user attention |
+| --- | --- | --- |
+| Phase 10: Lifecycle and recovery — implemented | Existing Recall normalization and persisted history | Confirm wording during the final demo. |
+| Phase 11: Demo reset — implemented | Existing fixture IDs and local store | None. |
+| Phase 12: Golden-path test — implemented | Phases 10–11 and mocked Recall/Groq boundaries | None; run `npm run test:golden`. |
+| Phase 13: Engineering polish implemented; live acceptance pending | Phases 10–12 | Required for one disposable live meeting, visible recording consent, explicit Groq confirmation, and final UI judgment. |
 
 ## 20. Definition of Done
 
@@ -966,6 +1137,10 @@ The project is complete when:
 * Approved action items can be exported as JSON.
 * No artifact automatically creates external tickets, modifies code or documents, assigns people without evidence, or executes external actions.
 * Mock mode supports a reliable demo.
+* Mock mode can be reset safely and deterministically without affecting live records or making external calls.
+* The application exposes the canonical lifecycle and allowed recovery action without regressing on out-of-order webhooks.
+* The privacy and retention behavior is documented accurately, including local transcript storage and non-storage of recording media.
+* A headless golden-path test covers creation, webhook processing, transcript normalization, explicit analysis, approval, and canonical export.
 * Calendar scheduling works or is clearly documented as a deferred feature.
 * Tests cover important success and failure paths.
 * The README accurately explains the current implementation.

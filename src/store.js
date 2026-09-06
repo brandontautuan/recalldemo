@@ -1,6 +1,28 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { canAdvanceMeetingState, canonicalMeetingStates, canonicalizeMeetingState, recoveryActionsForMeeting } from './lifecycle.js';
+
+const canonicalStateSet = new Set(canonicalMeetingStates);
+
+const normalizeHistoryEntry = (entry, attempt) => ({
+  ...entry,
+  status: entry.status ? canonicalizeMeetingState(entry.status) : null,
+  providerStatus: entry.providerStatus ?? entry.code ?? entry.status ?? entry.eventType,
+  attempt: entry.attempt ?? attempt,
+});
+
+const normalizeMeetingLifecycle = (meeting) => {
+  meeting.lifecycleAttempt = Number.isInteger(meeting.lifecycleAttempt) && meeting.lifecycleAttempt > 0 ? meeting.lifecycleAttempt : 1;
+  meeting.lifecycleAttemptStartedAt ??= meeting.createdAt ?? new Date().toISOString();
+  meeting.statusHistory = (Array.isArray(meeting.statusHistory) ? meeting.statusHistory : []).map((entry) => normalizeHistoryEntry(entry, meeting.lifecycleAttempt));
+  meeting.status = canonicalStateSet.has(meeting.canonicalState)
+    ? meeting.canonicalState
+    : canonicalizeMeetingState(meeting.status, meeting.transcriptStatus);
+  meeting.canonicalState = meeting.status;
+  meeting.stateUpdatedAt ??= meeting.statusHistory.at(-1)?.occurredAt ?? meeting.updatedAt ?? meeting.createdAt;
+  return meeting;
+};
 
 export class JsonStore {
   constructor(file = path.resolve('data/recall-store.json')) {
@@ -16,9 +38,10 @@ export class JsonStore {
       analyses: stored.analyses ?? {},
       reviewEvents: stored.reviewEvents ?? {},
     };
+    for (const meeting of Object.values(this.data.meetings)) normalizeMeetingLifecycle(meeting);
   }
   persist() { fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2)); }
-  addMeeting(meeting) { this.data.meetings[meeting.id] = meeting; this.persist(); return meeting; }
+  addMeeting(meeting) { this.data.meetings[meeting.id] = normalizeMeetingLifecycle(meeting); this.persist(); return meeting; }
   getMeeting(id) { return this.data.meetings[id] ?? null; }
   updateMeeting(id, patch) {
     const meeting = this.data.meetings[id];
@@ -38,14 +61,17 @@ export class JsonStore {
     if (!meeting) return null;
     meeting.botId = lifecycle.botId;
     meeting.recallBotId = lifecycle.botId;
+    normalizeMeetingLifecycle(meeting);
     const history = Array.isArray(meeting.statusHistory) ? meeting.statusHistory : [];
     const entry = {
       eventType: lifecycle.eventType,
       status: lifecycle.status,
+      providerStatus: lifecycle.providerStatus,
       code: lifecycle.code,
       subCode: lifecycle.subCode,
       message: lifecycle.message,
       occurredAt: lifecycle.occurredAt,
+      attempt: lifecycle.occurredAt < meeting.lifecycleAttemptStartedAt ? Math.max(1, meeting.lifecycleAttempt - 1) : meeting.lifecycleAttempt,
     };
     const duplicate = history.some((item) => item.eventType === entry.eventType
       && item.code === entry.code
@@ -54,17 +80,43 @@ export class JsonStore {
     if (!duplicate) history.push(entry);
     history.sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
     meeting.statusHistory = history;
-    const latest = history.at(-1);
-    const failure = [...history].reverse().find((item) => item.status === 'failed');
-    meeting.status = failure ? 'failed' : latest.status;
-    meeting.error = failure ? { code: failure.code, subCode: failure.subCode, message: failure.message } : null;
-    const recording = history.find((item) => item.status === 'recording');
-    if (recording) meeting.startedAt = recording.occurredAt;
-    const ended = [...history].reverse().find((item) => ['processing', 'complete', 'failed'].includes(item.status));
-    if (ended) meeting.endedAt = ended.occurredAt;
-    if (failure) meeting.processingStatus = 'failed';
-    else if (latest.status === 'complete') meeting.processingStatus = meeting.transcriptStatus === 'done' ? 'complete' : 'awaiting_transcript';
-    else if (latest.status === 'processing') meeting.processingStatus = 'awaiting_recording';
+    if (entry.attempt === meeting.lifecycleAttempt && entry.status && canAdvanceMeetingState(meeting.status, entry.status)) {
+      this.applyMeetingState(meeting, entry.status, entry);
+    }
+    meeting.updatedAt = new Date().toISOString();
+    this.persist();
+    return meeting;
+  }
+  applyMeetingState(meeting, state, { occurredAt = new Date().toISOString(), code = null, subCode = null, message = null } = {}) {
+    meeting.status = state;
+    meeting.canonicalState = state;
+    meeting.stateUpdatedAt = occurredAt;
+    if (state === 'recording') meeting.startedAt ??= occurredAt;
+    if (['transcript_processing', 'completed', 'failed'].includes(state)) meeting.endedAt ??= occurredAt;
+    if (state === 'failed') {
+      meeting.processingStatus = 'failed';
+      meeting.error = { code: code ?? 'capture_failed', subCode, message };
+    } else {
+      meeting.error = null;
+      if (state === 'completed') meeting.processingStatus = 'complete';
+      else if (state === 'transcript_processing') meeting.processingStatus = meeting.transcriptStatus === 'pending' ? 'awaiting_transcript' : 'transcribing';
+      else meeting.processingStatus ??= 'waiting_for_call';
+    }
+  }
+  setMeetingState(id, state, { eventType, code = state, subCode = null, message = null, occurredAt = new Date().toISOString(), allowRecovery = false } = {}) {
+    const meeting = this.getMeeting(id);
+    if (!meeting) return null;
+    normalizeMeetingLifecycle(meeting);
+    const newAttempt = allowRecovery && meeting.status === 'failed' && state === 'transcript_processing';
+    if (!canAdvanceMeetingState(meeting.status, state, { newAttempt })) return meeting;
+    if (newAttempt) {
+      meeting.lifecycleAttempt += 1;
+      meeting.lifecycleAttemptStartedAt = occurredAt;
+    }
+    const entry = { eventType: eventType ?? `app.${state}`, status: state, providerStatus: code, code, subCode, message, occurredAt, attempt: meeting.lifecycleAttempt };
+    meeting.statusHistory.push(entry);
+    meeting.statusHistory.sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
+    this.applyMeetingState(meeting, state, entry);
     meeting.updatedAt = new Date().toISOString();
     this.persist();
     return meeting;
@@ -74,10 +126,31 @@ export class JsonStore {
   rememberEvent(id, patch) { this.data.events[id] = { ...(this.data.events[id] ?? {}), ...patch }; this.persist(); }
   saveTranscript(id, transcript) { this.data.transcripts[id] = transcript; this.persist(); return transcript; }
   seedMock({ meeting, transcript, artifacts = [] }) {
-    if (!this.data.meetings[meeting.id]) this.data.meetings[meeting.id] = structuredClone(meeting);
+    if (!this.data.meetings[meeting.id]) this.data.meetings[meeting.id] = normalizeMeetingLifecycle(structuredClone(meeting));
     if (!this.data.transcripts[transcript.id]) this.data.transcripts[transcript.id] = structuredClone(transcript);
     for (const artifact of artifacts) if (!this.data.artifacts[artifact.id]) this.data.artifacts[artifact.id] = structuredClone(artifact);
     this.persist();
+  }
+  resetMock({ meeting, transcript, artifacts = [] }) {
+    const meetingId = meeting.id;
+    delete this.data.meetings[meetingId];
+    for (const [id, storedTranscript] of Object.entries(this.data.transcripts)) {
+      if (id === transcript.id || (storedTranscript.meetingId === meetingId && storedTranscript.isMock === true)) delete this.data.transcripts[id];
+    }
+    for (const [id, artifact] of Object.entries(this.data.artifacts)) {
+      if (artifact.meetingId === meetingId) delete this.data.artifacts[id];
+    }
+    for (const [id, analysis] of Object.entries(this.data.analyses)) {
+      if (analysis.meetingId === meetingId) delete this.data.analyses[id];
+    }
+    for (const [id, reviewEvent] of Object.entries(this.data.reviewEvents)) {
+      if (reviewEvent.meetingId === meetingId) delete this.data.reviewEvents[id];
+    }
+    this.data.meetings[meetingId] = normalizeMeetingLifecycle(structuredClone(meeting));
+    this.data.transcripts[transcript.id] = structuredClone(transcript);
+    for (const artifact of artifacts) this.data.artifacts[artifact.id] = structuredClone(artifact);
+    this.persist();
+    return this.getMeeting(meetingId);
   }
   beginAnalysis(meetingId, metadata = {}) {
     const active = Object.values(this.data.analyses).find((analysis) => analysis.meetingId === meetingId && analysis.status === 'running');
@@ -192,7 +265,9 @@ export class JsonStore {
   }
   artifactsForMeeting(meetingId) { return Object.values(this.data.artifacts).filter((artifact) => artifact.meetingId === meetingId); }
   dashboard() {
-    const meetings = Object.values(this.data.meetings).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const meetings = Object.values(this.data.meetings)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((meeting) => ({ ...meeting, recoveryActions: recoveryActionsForMeeting(meeting) }));
     return { mockMode: false, meetings, intents: meetings, transcripts: Object.values(this.data.transcripts), artifacts: Object.values(this.data.artifacts), analyses: Object.values(this.data.analyses), reviewEvents: Object.values(this.data.reviewEvents) };
   }
 }

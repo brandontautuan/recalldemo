@@ -7,6 +7,8 @@
   :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #172033; background: #f5f7fb; }
   body { max-width: 1080px; margin: 0 auto; padding: 2rem 1rem 4rem; }
   header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+  .mode-controls { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; justify-content: end; }
+  .mode-controls button { margin: 0; padding: .45rem .65rem; background: #42526d; }
   h1, h2, h3, p { margin-top: 0; }
   section, article { background: white; border: 1px solid #dfe5ef; border-radius: .75rem; padding: 1.25rem; margin: 1rem 0; }
   label { display: block; font-weight: 650; margin: .75rem 0; }
@@ -48,7 +50,7 @@
 <body>
   <header>
     <div><h1>Engineering Decision Pipeline</h1><p>Capture a technical meeting with Recall and preserve the evidence behind every follow-up.</p></div>
-    <span id="mode"></span>
+    <div class="mode-controls"><span id="mode"></span><button id="reset-demo" type="button" hidden>Reset demo</button></div>
   </header>
 
   <section>
@@ -68,6 +70,7 @@
       <label>Join at (optional)<input name="joinAt" type="datetime-local"></label>
       <button>Send Recall bot</button>
     </form>
+    <p class="muted">Recall joins as a visible meeting participant. This app stores the normalized transcript locally, not recording media. Transcript data is sent to Groq only after you explicitly confirm analysis; API keys stay server-side and exports remain local.</p>
     <p id="form-result" role="status"></p>
   </section>
 
@@ -194,7 +197,7 @@
     const formatLabel = node('label', 'Format');
     const format = document.createElement('select');
     for (const value of ['canonical', 'linear', 'jira']) {
-      const option = node('option', value === 'canonical' ? 'Canonical application JSON' : `${value[0].toUpperCase()}${value.slice(1)} import draft`);
+      const option = node('option', value === 'canonical' ? 'Canonical application JSON (recommended)' : `${value[0].toUpperCase()}${value.slice(1)} import draft`);
       option.value = value;
       format.append(option);
     }
@@ -441,14 +444,16 @@
     card.append(node('h2', meeting.title || 'Untitled meeting'), node('span', readable(meeting.status), 'badge'));
     if (meeting.isMock) card.append(node('span', ' Fixture data', 'badge mock'));
     card.append(node('p', `${readable(meeting.meetingType)} · Bot ${meeting.botId ?? 'not assigned'}`, 'muted'));
-    if (meeting.error) card.append(node('p', `Error: ${meeting.error.subCode ?? meeting.error.code ?? meeting.error.message}`, 'error'));
-    if (!meeting.isMock && meeting.botId) {
+    if (meeting.error) card.append(node('p', `Error: ${meeting.error.message ?? meeting.error.subCode ?? meeting.error.code}`, 'error'));
+    if (!meeting.isMock && meeting.recoveryActions?.length) {
       const actions = node('div', undefined, 'actions');
-      const reconcile = node('button', 'Reconcile status');
-      reconcile.type = 'button';
-      reconcile.onclick = () => runMeetingAction(meeting.id, 'reconcile');
-      actions.append(reconcile);
-      if (meeting.processingStatus === 'failed' || meeting.transcriptStatus === 'failed') {
+      if (meeting.recoveryActions.includes('reconcile_status')) {
+        const reconcile = node('button', 'Reconcile status');
+        reconcile.type = 'button';
+        reconcile.onclick = () => runMeetingAction(meeting.id, 'reconcile');
+        actions.append(reconcile);
+      }
+      if (meeting.recoveryActions.includes('retry_processing')) {
         const retry = node('button', 'Retry processing');
         retry.type = 'button';
         retry.onclick = () => runMeetingAction(meeting.id, 'process');
@@ -461,7 +466,10 @@
     }
     card.append(node('h3', 'Lifecycle'));
     const history = node('ol', undefined, 'history');
-    for (const entry of meeting.statusHistory ?? []) history.append(node('li', `${readable(entry.status)} — ${new Date(entry.occurredAt).toLocaleString()}`));
+    for (const entry of meeting.statusHistory ?? []) {
+      const providerDetail = entry.providerStatus && entry.providerStatus !== entry.status ? ` · Recall: ${readable(entry.providerStatus)}` : '';
+      history.append(node('li', `${readable(entry.status ?? 'unmapped event')}${providerDetail} — ${new Date(entry.occurredAt).toLocaleString()}`));
+    }
     card.append(history);
     if (!transcript) card.append(node('p', `Transcript: ${readable(meeting.transcriptStatus)}`, 'muted'));
     if (transcript?.analytics) card.append(renderAnalytics(transcript.analytics));
@@ -563,6 +571,7 @@
     const mode = document.querySelector('#mode');
     mode.textContent = dashboard.mockMode ? 'MOCK MODE' : 'LIVE MODE';
     mode.className = dashboard.mockMode ? 'badge mock' : 'badge';
+    document.querySelector('#reset-demo').hidden = !dashboard.mockMode;
     root.replaceChildren();
     if (!dashboard.meetings?.length) root.append(node('p', 'No meetings have been scheduled yet.'));
     for (const meeting of dashboard.meetings ?? []) {
@@ -601,6 +610,20 @@
     const result = await response.json();
     document.querySelector('#form-result').textContent = response.ok ? 'Recall bot created.' : result.error;
     await loadDashboard();
+  };
+
+  document.querySelector('#reset-demo').onclick = async (event) => {
+    if (!window.confirm('Reset only the clearly labeled demo fixture and discard its local review and analysis changes?')) return;
+    event.currentTarget.disabled = true;
+    try {
+      const response = await fetch('/api/demo/reset', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      const result = await response.json();
+      document.querySelector('#form-result').textContent = response.ok ? 'Demo fixture reset.' : result.error;
+      if (response.ok) meetingContextStates.delete('mock-architecture-review');
+      await loadDashboard();
+    } finally {
+      event.currentTarget.disabled = false;
+    }
   };
 
   loadDashboard();

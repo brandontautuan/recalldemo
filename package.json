@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node --env-file=.env src/server.js",
     "test": "node --test",
+    "test:golden": "node --test test/golden-path.test.js",
     "smoke": "node --env-file=.env src/server.js --smoke",
     "migrate-context": "node --env-file=.env src/scripts/migrate-context.js",
     "seed-context": "node --env-file=.env src/scripts/seed-context.js"
