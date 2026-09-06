@@ -26,6 +26,14 @@ test('configuration permits only Groq strict-output models and bounded concurren
   assert.equal(config.groqModel, 'openai/gpt-oss-120b');
   assert.equal(config.groqMaximumConcurrency, 2);
 });
+test('configuration validates bounded project-context storage settings', () => {
+  const config = createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', DATABASE_PATH: 'data/context.sqlite', PROJECT_CONTEXT_SEED_PATH: 'seeds/context.json', PROJECT_CONTEXT_MAX_CHARACTERS: '12000' });
+  assert.equal(config.databasePath, 'data/context.sqlite');
+  assert.equal(config.projectContextSeedPath, 'seeds/context.json');
+  assert.equal(config.projectContextMaximumCharacters, 12_000);
+  assert.throws(() => createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', PROJECT_CONTEXT_MAX_CHARACTERS: '999' }), /integer from 1000/);
+  assert.throws(() => createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', GROQ_MAX_INPUT_CHARACTERS: '12000', PROJECT_CONTEXT_MAX_CHARACTERS: '12000' }), /must be smaller/);
+});
 test('only future tagged calendar events with a meeting URL are eligible', () => {
   const future = new Date(Date.now() + 60_000).toISOString();
   assert.equal(eligibleCalendarEvent({ id:'1', raw:{summary:'Planning [recall]'}, meeting_url:'https://meet.google.com/a', start_time:future }), true);
@@ -154,7 +162,7 @@ test('runs Groq analysis only through the explicit manual endpoint and persists 
       type: 'action_item', title: 'Document the migration plan', status: 'proposed', description: 'Write the event-model migration and its acceptance checks.', context: null, decision: null,
       alternativesRejected: [], consequences: [], assignee: 'Ada', dueDate: null, acceptanceCriteria: ['The migration and rollback steps are documented.'], priority: 'medium',
       stepsToReproduce: [], expectedBehavior: null, actualBehavior: null, severity: null, impact: null, mitigation: null, owner: null, question: null, suggestedOwner: null,
-      evidenceUtteranceIds: ['utterance-1'], confidence: 'high',
+      evidenceUtteranceIds: ['utterance-1'], contextSourceIds: [], confidence: 'high',
     }] } };
   } };
   const config = createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true' });

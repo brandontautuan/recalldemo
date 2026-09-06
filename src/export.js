@@ -26,6 +26,9 @@ const timestampLabel = (seconds) => {
 const evidenceMarkdown = (evidence) => evidence.length
   ? evidence.map((item) => `- [${timestampLabel(item.startTime)}] ${item.speaker ?? 'Unknown speaker'}: ${item.text}`).join('\n')
   : '- No transcript evidence was supplied.';
+const contextMarkdown = (provenance) => provenance?.sources?.length
+  ? provenance.sources.map((source) => `- ${source.label} (${source.kind}, revision ${source.revision}, ${source.sourceId})`).join('\n')
+  : '- No retrieved project-context source informed this artifact.';
 
 const contentMarkdown = (content) => Object.entries(content)
   .filter(([, value]) => value !== null && value !== '' && (!Array.isArray(value) || value.length))
@@ -42,6 +45,7 @@ const contentMarkdown = (content) => Object.entries(content)
 const artifactMarkdown = (artifact, meeting) => [
   contentMarkdown(artifact.content),
   `## Source meeting\n${meeting.title} (${meeting.id})`,
+  `## Retrieved project context\n${contextMarkdown(artifact.contextProvenance)}`,
   `## Transcript evidence\n${evidenceMarkdown(artifact.evidence ?? [])}`,
 ].filter(Boolean).join('\n\n');
 
@@ -60,6 +64,7 @@ const canonicalArtifact = (artifact, reviewEvents) => ({
   content: structuredClone(artifact.content),
   confidence: artifact.confidence,
   provenance: { source: artifact.source, userEdited: Boolean(artifact.userEdited) },
+  contextProvenance: structuredClone(artifact.contextProvenance ?? null),
   approvedAt: approvedAt(artifact, reviewEvents),
   evidence: structuredClone(artifact.evidence ?? []),
 });

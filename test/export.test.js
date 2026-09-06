@@ -42,6 +42,23 @@ test('canonical export contains only explicitly selected approved versions and e
   assert.ok(payload.artifacts[0].approvedAt);
 });
 
+test('exports retrieved context provenance separately from transcript evidence', (context) => {
+  const store = fixtureStore(context);
+  const artifact = store.getArtifact('mock-artifact-adr');
+  artifact.contextProvenance = {
+    selectionId: 'selection-1', projectId: 'project-event-platform', contentSha256: 'a'.repeat(64),
+    sources: [{ sourceId: 'document:architecture', kind: 'readme_excerpt', label: 'Architecture README', revision: 2 }],
+  };
+  const approved = approve(store, artifact.id);
+  const canonical = exportFrom(store, 'canonical', [selection(approved)]);
+  assert.equal(canonical.artifacts[0].contextProvenance.selectionId, 'selection-1');
+  assert.equal(canonical.artifacts[0].evidence[0].utteranceId, 'mock-utterance-2');
+  const linear = exportFrom(store, 'linear', [selection(approved)]);
+  assert.match(linear.drafts[0].input.description, /Retrieved project context/);
+  assert.match(linear.drafts[0].input.description, /Architecture README/);
+  assert.match(linear.drafts[0].input.description, /Transcript evidence/);
+});
+
 test('Linear export produces issueCreate drafts without inventing workspace IDs', (context) => {
   const store = fixtureStore(context);
   const actionItem = approve(store, 'mock-artifact-action');

@@ -3,9 +3,14 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "start": "node --env-file=.env src/server.js",
     "test": "node --test",
-    "smoke": "node --env-file=.env src/server.js --smoke"
+    "smoke": "node --env-file=.env src/server.js --smoke",
+    "migrate-context": "node --env-file=.env src/scripts/migrate-context.js",
+    "seed-context": "node --env-file=.env src/scripts/seed-context.js"
   }
 }

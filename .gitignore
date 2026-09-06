@@ -11,6 +11,15 @@ node_modules/
 *.log
 npm-debug.log*
 
+# Generated project-context databases and private seed overrides.
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+seeds/*.local.json
+
 # Local OAuth credentials and private key material.
 client_secret*.json
 *-credentials.json

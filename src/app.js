@@ -7,6 +7,8 @@ import { normalizeLifecycleEvent, normalizeRetrievedStatus } from './lifecycle.j
 import { ArtifactValidationError, validateAndHydrateArtifacts, validateArtifactRevision } from './artifacts.js';
 import { GroqBusyError, GroqConfigurationError, GroqRateLimitError } from './groq-client.js';
 import { createArtifactExport, ExportValidationError, ExportVersionConflictError, safeExportFilename } from './export.js';
+import { buildContextSelection, projectContextHash } from './context-selector.js';
+import { ContextSelectionIntegrityError } from './context-db.js';
 
 const publicDir = path.resolve('public');
 const titleOf = (event) => event.raw?.summary ?? event.raw?.title ?? event.title ?? '';
@@ -31,7 +33,7 @@ const validMeetingUrl = (value) => {
   }
 };
 
-export function createApp({ config, recall, store, analysis, logger = console }) {
+export function createApp({ config, recall, store, analysis, contextStore = null, logger = console }) {
   const meetingForBot = (botId) => botId ? store.findMeetingByBotId(botId) : null;
 
   const requestTranscript = async (recordingId, meeting) => {
@@ -144,8 +146,22 @@ export function createApp({ config, recall, store, analysis, logger = console })
   return async function app(req, res) {
     const url = new URL(req.url, 'http://local');
     if (req.method === 'GET' && url.pathname === '/') { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(fs.readFileSync(path.join(publicDir, 'index.html'))); }
+    if (req.method === 'GET' && url.pathname === '/context-ui-state.js') { res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); return res.end(fs.readFileSync(path.join(publicDir, 'context-ui-state.js'))); }
     if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(res, 200, { ...store.dashboard(), mockMode: config.mockMode });
     if (req.method === 'GET' && url.pathname === '/api/meetings') return json(res, 200, store.dashboard().meetings);
+    if (req.method === 'GET' && url.pathname === '/api/projects') {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      return json(res, 200, { projects: contextStore.listProjects() });
+    }
+    const projectContextMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/context$/);
+    if (req.method === 'GET' && projectContextMatch) {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      const projectId = decodeURIComponent(projectContextMatch[1]);
+      const inventory = contextStore.projectInventory(projectId);
+      if (!inventory) return json(res, 404, { error: 'Project not found.' });
+      if (!inventory.project.isActive) return json(res, 409, { error: 'Project is inactive.' });
+      return json(res, 200, inventory);
+    }
     const artifactMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)$/);
     if (req.method === 'GET' && artifactMatch) {
       const artifactId = decodeURIComponent(artifactMatch[1]);
@@ -209,6 +225,29 @@ export function createApp({ config, recall, store, analysis, logger = console })
       if (!store.getMeeting(meetingId)) return json(res, 404, { error: 'Meeting not found.' });
       return json(res, 200, { artifacts: store.artifactsForMeeting(meetingId), analysis: store.latestAnalysis(meetingId), reviewEvents: store.reviewEventsForMeeting(meetingId) });
     }
+    const contextPreviewMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/context-preview$/);
+    if (req.method === 'POST' && contextPreviewMatch) {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      const meetingId = decodeURIComponent(contextPreviewMatch[1]);
+      const meeting = store.getMeeting(meetingId);
+      if (!meeting) return json(res, 404, { error: 'Meeting not found.' });
+      const transcript = store.findTranscriptByMeetingId(meetingId);
+      if (!transcript || transcript.status !== 'done' || !transcript.utterances?.length) return json(res, 409, { error: 'A completed normalized transcript is required before creating a context preview.' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'Request body must be valid JSON.' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Request body must be a JSON object.' });
+      if (Object.keys(body).some((field) => !['projectId', 'projectContext'].includes(field))) return json(res, 400, { error: 'Request body contains unsupported fields.' });
+      if (typeof body.projectId !== 'string' || !body.projectId.trim()) return json(res, 400, { error: 'projectId is required.' });
+      if (body.projectContext !== undefined && (typeof body.projectContext !== 'string' || body.projectContext.length > 4_000)) return json(res, 400, { error: 'Project context must be a string of at most 4000 characters.' });
+      const bundle = contextStore.getProjectBundle(body.projectId.trim().toLowerCase());
+      if (!bundle) return json(res, 404, { error: 'Project not found.' });
+      if (!bundle.project.isActive) return json(res, 409, { error: 'Project is inactive.' });
+      const projectContext = body.projectContext?.trim() || null;
+      const preview = buildContextSelection({ ...bundle, meeting, transcript, projectContext, maximumCharacters: config.projectContextMaximumCharacters });
+      const saved = contextStore.saveContextSelection({ meetingId, projectId: bundle.project.id, ...preview });
+      return json(res, 201, { contextSelection: saved });
+    }
     const exportMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/export$/);
     if (req.method === 'POST' && exportMatch) {
       const meetingId = decodeURIComponent(exportMatch[1]);
@@ -249,15 +288,53 @@ export function createApp({ config, recall, store, analysis, logger = console })
         return json(res, 400, { error: 'Request body must be valid JSON.' });
       }
       if (!requestBody || typeof requestBody !== 'object' || Array.isArray(requestBody)) return json(res, 400, { error: 'Request body must be a JSON object.' });
+      if (Object.keys(requestBody).some((field) => !['contextSelectionId', 'projectContext'].includes(field))) return json(res, 400, { error: 'Request body contains unsupported fields.' });
       if (requestBody.projectContext !== undefined && (typeof requestBody.projectContext !== 'string' || requestBody.projectContext.length > 4_000)) {
         return json(res, 400, { error: 'Project context must be a string of at most 4000 characters.' });
       }
-      const job = store.beginAnalysis(meetingId);
+      if (requestBody.contextSelectionId !== undefined && (typeof requestBody.contextSelectionId !== 'string' || !requestBody.contextSelectionId.trim() || requestBody.contextSelectionId.length > 128)) {
+        return json(res, 400, { error: 'contextSelectionId must be a non-empty string of at most 128 characters.' });
+      }
+      const projectContext = requestBody.projectContext?.trim() || null;
+      let contextSelection = null;
+      if (requestBody.contextSelectionId !== undefined) {
+        if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+        try { contextSelection = contextStore.getContextSelection(requestBody.contextSelectionId.trim()); }
+        catch (error) {
+          if (error instanceof ContextSelectionIntegrityError) return json(res, 409, { error: 'The saved context preview failed its integrity check. Create a new preview.' });
+          logger.error('context-selection-read-failed', { meetingId });
+          return json(res, 503, { error: 'The saved context preview is temporarily unavailable.' });
+        }
+        if (!contextSelection) return json(res, 404, { error: 'Context preview not found.' });
+        if (contextSelection.meetingId !== meetingId) return json(res, 409, { error: 'Context preview belongs to another meeting.' });
+        if (contextSelection.analysisId) return json(res, 409, { error: 'Context preview has already been used. Create a new preview.' });
+        if (contextSelection.query.projectContextSha256 !== projectContextHash(projectContext)) return json(res, 409, { error: 'Project notes changed after the context preview. Create a new preview.' });
+        const selectedProject = contextStore.getProject(contextSelection.projectId);
+        if (!selectedProject || !selectedProject.isActive) return json(res, 409, { error: 'The selected project is no longer available.' });
+      }
+      const job = store.beginAnalysis(meetingId, contextSelection ? {
+        contextSelectionId: contextSelection.id,
+        contextSelectionSha256: contextSelection.contentSha256,
+        projectId: contextSelection.projectId,
+      } : {});
       if (!job) return json(res, 409, { error: 'Analysis is already running for this meeting.' });
+      if (contextSelection) {
+        let linked;
+        try { linked = contextStore.linkContextSelectionToAnalysis(contextSelection.id, job.id); }
+        catch {
+          store.finishAnalysis(job.id, { status: 'failed', error: { code: 'context_selection_unavailable' } });
+          logger.error('context-selection-link-failed', { meetingId, contextSelectionId: contextSelection.id });
+          return json(res, 503, { error: 'The context preview could not be linked to analysis.' });
+        }
+        if (!linked) {
+          store.finishAnalysis(job.id, { status: 'failed', error: { code: 'context_selection_conflict' } });
+          return json(res, 409, { error: 'Context preview was used concurrently. Create a new preview.' });
+        }
+      }
       store.updateMeeting(meetingId, { analysisStatus: 'running' });
       try {
-        const generated = await analysis.analyze({ meeting, transcript, projectContext: requestBody.projectContext?.trim() || null });
-        const artifacts = validateAndHydrateArtifacts(generated.output, { meetingId, participants: meeting.participants ?? [], utterances: transcript.utterances });
+        const generated = await analysis.analyze({ meeting, transcript, projectContext, contextSelection });
+        const artifacts = validateAndHydrateArtifacts(generated.output, { meetingId, participants: meeting.participants ?? [], utterances: transcript.utterances, contextSelection });
         const storedArtifacts = store.replaceProposedArtifacts(meetingId, artifacts);
         const completed = store.finishAnalysis(job.id, { status: 'complete', model: generated.model, usage: generated.usage, rateLimit: generated.rateLimit, artifactCount: storedArtifacts.length });
         store.updateMeeting(meetingId, { analysisStatus: 'complete', analysisError: null });

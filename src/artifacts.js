@@ -40,9 +40,10 @@ export const artifactResponseSchema = {
           question: nullableString,
           suggestedOwner: nullableString,
           evidenceUtteranceIds: stringArray,
+          contextSourceIds: stringArray,
           confidence: { type: 'string', enum: confidenceValues },
         },
-        required: ['type', 'title', 'status', 'description', 'context', 'decision', 'alternativesRejected', 'consequences', 'assignee', 'dueDate', 'acceptanceCriteria', 'priority', 'stepsToReproduce', 'expectedBehavior', 'actualBehavior', 'severity', 'impact', 'mitigation', 'owner', 'question', 'suggestedOwner', 'evidenceUtteranceIds', 'confidence'],
+        required: ['type', 'title', 'status', 'description', 'context', 'decision', 'alternativesRejected', 'consequences', 'assignee', 'dueDate', 'acceptanceCriteria', 'priority', 'stepsToReproduce', 'expectedBehavior', 'actualBehavior', 'severity', 'impact', 'mitigation', 'owner', 'question', 'suggestedOwner', 'evidenceUtteranceIds', 'contextSourceIds', 'confidence'],
       },
     },
   },
@@ -61,10 +62,10 @@ const isNullableString = (value) => value === null || typeof value === 'string';
 const isStringArray = (value) => Array.isArray(value) && value.every((item) => typeof item === 'string');
 const normalizedTitle = (value) => value.trim().toLocaleLowerCase();
 const artifactFields = new Set(Object.keys(artifactResponseSchema.properties.artifacts.items.properties));
-const immutableArtifactFields = new Set(['type', 'status', 'evidenceUtteranceIds', 'confidence']);
+const immutableArtifactFields = new Set(['type', 'status', 'evidenceUtteranceIds', 'contextSourceIds', 'confidence']);
 const editableContentFields = new Set([...artifactFields].filter((field) => !immutableArtifactFields.has(field) && field !== 'title'));
 
-export function validateAndHydrateArtifacts(payload, { meetingId, participants, utterances }) {
+export function validateAndHydrateArtifacts(payload, { meetingId, participants, utterances, contextSelection = null }) {
   const issues = [];
   if (!payload || typeof payload !== 'object' || !Array.isArray(payload.artifacts)) {
     throw new ArtifactValidationError(['root.artifacts must be an array']);
@@ -72,6 +73,7 @@ export function validateAndHydrateArtifacts(payload, { meetingId, participants, 
   for (const field of Object.keys(payload)) if (field !== 'artifacts') issues.push(`root.${field} is not allowed`);
   if (payload.artifacts.length > 30) issues.push('no more than 30 artifacts may be returned');
   const utteranceById = new Map(utterances.map((utterance) => [utterance.id, utterance]));
+  const contextSourceById = new Map((contextSelection?.sources ?? []).map((source) => [source.id, source]));
   const participantNames = new Set(participants.map((participant) => participant.name).filter(Boolean));
   const duplicates = new Set();
 
@@ -86,6 +88,15 @@ export function validateAndHydrateArtifacts(payload, { meetingId, participants, 
     if (!confidenceValues.includes(artifact.confidence)) issues.push(`${label}.confidence is invalid`);
     if (!isStringArray(artifact.evidenceUtteranceIds)) issues.push(`${label}.evidenceUtteranceIds must be a string array`);
     else for (const id of artifact.evidenceUtteranceIds) if (!utteranceById.has(id)) issues.push(`${label} references unknown evidence ${id}`);
+    if (!isStringArray(artifact.contextSourceIds)) issues.push(`${label}.contextSourceIds must be a string array`);
+    else {
+      const referencedSources = new Set();
+      for (const id of artifact.contextSourceIds) {
+        if (!contextSourceById.has(id)) issues.push(`${label} references unknown context source ${id}`);
+        if (referencedSources.has(id)) issues.push(`${label} duplicates context source ${id}`);
+        referencedSources.add(id);
+      }
+    }
     if (artifact.assignee !== null && !participantNames.has(artifact.assignee)) issues.push(`${label}.assignee is not a meeting participant`);
     if (artifact.owner !== null && !participantNames.has(artifact.owner)) issues.push(`${label}.owner is not a meeting participant`);
     if (artifact.suggestedOwner !== null && !participantNames.has(artifact.suggestedOwner)) issues.push(`${label}.suggestedOwner is not a meeting participant`);
@@ -121,7 +132,11 @@ export function validateAndHydrateArtifacts(payload, { meetingId, participants, 
         text: utterance.text,
       };
     });
-    const { type, title, status, confidence, evidenceUtteranceIds, ...content } = artifact;
+    const contextSources = artifact.contextSourceIds.map((sourceId) => {
+      const source = contextSourceById.get(sourceId);
+      return { sourceId, kind: source.kind, label: source.label, revision: source.revision };
+    });
+    const { type, title, status, confidence, evidenceUtteranceIds, contextSourceIds, ...content } = artifact;
     return {
       id: crypto.randomUUID(),
       meetingId,
@@ -131,6 +146,12 @@ export function validateAndHydrateArtifacts(payload, { meetingId, participants, 
       content,
       confidence,
       evidence,
+      contextProvenance: contextSelection ? {
+        selectionId: contextSelection.id,
+        projectId: contextSelection.projectId,
+        contentSha256: contextSelection.contentSha256,
+        sources: contextSources,
+      } : null,
       evidenceState: evidence.length ? 'supported' : 'missing',
       validationWarnings: evidence.length ? [] : ['No transcript evidence was supplied.'],
       source: 'groq',
@@ -158,8 +179,15 @@ export function validateArtifactRevision(artifact, revision, context) {
     ...artifact.content,
     ...(revision.content ?? {}),
     evidenceUtteranceIds: (artifact.evidence ?? []).map((item) => item.utteranceId),
+    contextSourceIds: (artifact.contextProvenance?.sources ?? []).map((item) => item.sourceId),
     confidence: artifact.confidence,
   };
-  const [validated] = validateAndHydrateArtifacts({ artifacts: [candidate] }, { ...context, meetingId: artifact.meetingId });
+  const contextSelection = artifact.contextProvenance ? {
+    id: artifact.contextProvenance.selectionId,
+    projectId: artifact.contextProvenance.projectId,
+    contentSha256: artifact.contextProvenance.contentSha256,
+    sources: artifact.contextProvenance.sources.map((source) => ({ id: source.sourceId, ...source })),
+  } : null;
+  const [validated] = validateAndHydrateArtifacts({ artifacts: [candidate] }, { ...context, meetingId: artifact.meetingId, contextSelection });
   return { title: validated.title, content: validated.content };
 }

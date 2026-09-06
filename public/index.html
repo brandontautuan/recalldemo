@@ -34,6 +34,16 @@
   .actions { display: flex; align-items: end; gap: .5rem; flex-wrap: wrap; margin: .75rem 0; }
   .actions textarea { flex: 1 1 32rem; }
   .actions button { background: #42526d; }
+  .context-workspace { background: #f7f9fd; }
+  .context-controls { display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(18rem, 2fr); gap: .75rem; align-items: end; }
+  .context-controls label { margin: 0; }
+  .context-preview { border: 1px solid #b9c8e6; border-radius: .5rem; background: white; padding: .9rem; margin-top: .75rem; }
+  .context-source { border-top: 1px solid #dfe5ef; padding: .5rem 0; }
+  .context-source summary { cursor: pointer; font-weight: 650; }
+  .context-source pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f7f9fd; padding: .65rem; }
+  .context-provenance { border-left: 3px solid #2b7a67; background: #f1faf7; padding: .65rem .8rem; margin: .75rem 0; }
+  .artifact h4 { margin-bottom: .35rem; }
+  @media (max-width: 700px) { .context-controls { grid-template-columns: 1fr; } }
 </style>
 <body>
   <header>
@@ -63,7 +73,16 @@
 
   <main id="dashboard"><p>Loading meetings…</p></main>
 
-<script>
+<script type="module">
+  import {
+    contextPreviewIsCurrent,
+    contextPreviewPayload,
+    createMeetingContextState,
+    manualAnalysisPayload,
+    saveContextPreview,
+    updateMeetingContext,
+  } from '/context-ui-state.js';
+
   const node = (tag, text, className) => {
     const item = document.createElement(tag);
     if (text !== undefined) item.textContent = text;
@@ -80,6 +99,10 @@
     risk: [['description', 'Description'], ['impact', 'Impact', 'level'], ['mitigation', 'Mitigation'], ['owner', 'Owner']],
     open_question: [['question', 'Question'], ['suggestedOwner', 'Suggested owner']],
   };
+  const meetingContextStates = new Map();
+  let selectableProjects = [];
+  let projectsLoaded = false;
+  let projectLoadError = null;
 
   const displayValue = (value) => Array.isArray(value)
     ? value.map((item) => typeof item === 'string' ? item : `${item.alternative}: ${item.reason}`).join('; ')
@@ -261,6 +284,158 @@
     return section;
   }
 
+  function renderContextPreview(preview) {
+    const panel = node('div', undefined, 'context-preview');
+    panel.append(
+      node('h4', 'Context preview — no Groq request made'),
+      node('p', `${preview.project.name} · ${preview.characterCount} of ${preview.maximumCharacters} characters selected`, 'muted'),
+      node('p', 'Only this displayed snapshot, the normalized transcript, and your notes will be sent after confirmation.'),
+    );
+    panel.append(node('strong', `Included sources (${preview.sources.length})`));
+    for (const source of preview.sources) {
+      const details = node('details', undefined, 'context-source');
+      details.append(node('summary', `${source.label} · ${readable(source.kind)} · revision ${source.revision}`));
+      details.append(node('pre', source.text));
+      panel.append(details);
+    }
+    panel.append(node('strong', `Omitted sources (${preview.omissions.length})`));
+    if (!preview.omissions.length) panel.append(node('p', 'No sources were omitted.', 'muted'));
+    else {
+      const list = node('ul');
+      for (const omission of preview.omissions) list.append(node('li', `${omission.label} — ${readable(omission.reason)}`));
+      panel.append(list);
+    }
+    return panel;
+  }
+
+  function renderContextWorkspace(meeting, analysis) {
+    const workspace = node('section', undefined, 'context-workspace');
+    workspace.dataset.meetingId = meeting.id;
+    workspace.append(
+      node('h3', 'Manual engineering analysis'),
+      node('p', 'Optionally select reviewed project context. Previewing is deterministic and never calls Groq.', 'muted'),
+    );
+    let state = meetingContextStates.get(meeting.id) ?? createMeetingContextState();
+    meetingContextStates.set(meeting.id, state);
+    if (state.projectId && !selectableProjects.some((project) => project.id === state.projectId)) {
+      state = updateMeetingContext(state, { projectId: '' });
+      meetingContextStates.set(meeting.id, state);
+    }
+
+    const controls = node('div', undefined, 'context-controls');
+    const projectLabel = node('label', 'Seeded project context (optional)');
+    const project = document.createElement('select');
+    project.append(Object.assign(node('option', 'No seeded project — notes only'), { value: '' }));
+    for (const item of selectableProjects) project.append(Object.assign(node('option', item.name), { value: item.id }));
+    project.value = state.projectId;
+    project.disabled = Boolean(projectLoadError) || state.busy !== null;
+    projectLabel.append(project);
+    const notesLabel = node('label', 'Optional project notes');
+    const notes = document.createElement('textarea');
+    notes.placeholder = 'Constraints, terminology, or repository details';
+    notes.maxLength = 4000;
+    notes.rows = 3;
+    notes.value = state.projectContext;
+    notes.disabled = state.busy !== null;
+    notesLabel.append(notes);
+    controls.append(projectLabel, notesLabel);
+    workspace.append(controls);
+
+    const actions = node('div', undefined, 'artifact-controls');
+    const previewButton = node('button', state.busy === 'preview' ? 'Creating preview…' : 'Preview selected context');
+    previewButton.type = 'button';
+    const analyzeButton = node('button', state.busy === 'analysis' || analysis?.status === 'running' ? 'Analysis running…' : 'Analyze transcript with Groq');
+    analyzeButton.type = 'button';
+    const retryProjects = node('button', 'Retry project loading');
+    retryProjects.type = 'button';
+    retryProjects.hidden = !projectLoadError;
+    const status = node('p', '', 'muted');
+    status.setAttribute('role', 'status');
+    const previewHost = node('div');
+
+    const saveState = (nextState) => {
+      state = nextState;
+      meetingContextStates.set(meeting.id, state);
+    };
+    const sync = () => {
+      const previewCurrent = contextPreviewIsCurrent(state);
+      project.disabled = Boolean(projectLoadError) || state.busy !== null;
+      notes.disabled = state.busy !== null;
+      previewButton.disabled = !state.projectId || state.busy !== null || analysis?.status === 'running';
+      analyzeButton.disabled = state.busy !== null || analysis?.status === 'running' || (Boolean(state.projectId) && !previewCurrent);
+      analyzeButton.textContent = state.busy === 'analysis' || analysis?.status === 'running'
+        ? 'Analysis running…'
+        : state.projectId && !previewCurrent ? 'Preview context before analysis' : 'Analyze transcript with Groq';
+      status.className = state.error ? 'error' : 'muted';
+      status.textContent = state.error ?? (previewCurrent ? 'Preview is current and ready for explicit confirmation.' : projectLoadError ?? 'Groq runs only after you click Analyze and confirm.');
+      previewHost.replaceChildren();
+      if (previewCurrent) previewHost.append(renderContextPreview(state.preview));
+      workspace.dataset.dirty = state.projectId || state.projectContext ? 'true' : 'false';
+    };
+
+    project.onchange = () => {
+      saveState(updateMeetingContext(state, { projectId: project.value }));
+      sync();
+    };
+    notes.oninput = () => {
+      saveState(updateMeetingContext(state, { projectContext: notes.value }));
+      sync();
+    };
+    previewButton.onclick = async () => {
+      saveState({ ...state, busy: 'preview', error: null });
+      sync();
+      try {
+        const response = await fetch(`/api/meetings/${encodeURIComponent(meeting.id)}/context-preview`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(contextPreviewPayload(state)),
+        });
+        const responseBody = await response.json();
+        if (!response.ok) throw new Error(responseBody.error ?? 'Context preview failed.');
+        saveState(saveContextPreview(state, responseBody.contextSelection));
+      } catch (error) {
+        saveState({ ...state, busy: null, preview: null, previewProjectContext: null, error: error.message });
+      }
+      sync();
+    };
+    analyzeButton.onclick = async () => {
+      let payload;
+      try { payload = manualAnalysisPayload(state); }
+      catch (error) { saveState({ ...state, error: error.message }); sync(); return; }
+      const selectedProject = selectableProjects.find((item) => item.id === state.projectId);
+      const disclosure = selectedProject
+        ? `Send the normalized transcript, your notes, and ${state.preview.sources.length} displayed sources from ${selectedProject.name} to Groq?`
+        : 'Send the normalized transcript and your supplied notes to Groq?';
+      if (!window.confirm(disclosure)) return;
+      saveState({ ...state, busy: 'analysis', error: null });
+      sync();
+      try {
+        const response = await fetch(`/api/meetings/${encodeURIComponent(meeting.id)}/analyze`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const responseBody = await response.json();
+        if (!response.ok) throw new Error(responseBody.error ?? 'Groq analysis failed.');
+        saveState({ ...state, busy: null, preview: null, previewProjectContext: null, error: null });
+        document.querySelector('#form-result').textContent = 'Manual Groq analysis complete.';
+        await loadDashboard();
+      } catch (error) {
+        const retryAdvice = state.projectId ? ' Create a new preview before retrying.' : '';
+        saveState({ ...state, busy: null, preview: null, previewProjectContext: null, error: `${error.message}${retryAdvice}` });
+        sync();
+      }
+    };
+    retryProjects.onclick = async () => {
+      await loadProjects(true);
+      await loadDashboard();
+    };
+    actions.append(previewButton, analyzeButton, retryProjects);
+    workspace.append(actions, status, previewHost);
+    sync();
+    return workspace;
+  }
+
   function renderMeeting(meeting, transcript, artifacts, analysis, reviewEvents) {
     const card = node('article');
     card.append(node('h2', meeting.title || 'Untitled meeting'), node('span', readable(meeting.status), 'badge'));
@@ -282,19 +457,7 @@
       card.append(actions);
     }
     if (transcript?.status === 'done') {
-      const actions = node('div', undefined, 'actions');
-      const context = document.createElement('textarea');
-      context.placeholder = 'Optional project context (constraints, repository details, or terminology)';
-      context.maxLength = 4000;
-      context.rows = 3;
-      const analyze = node('button', analysis?.status === 'running' ? 'Analysis running…' : 'Analyze transcript with Groq');
-      analyze.type = 'button';
-      analyze.disabled = analysis?.status === 'running';
-      analyze.onclick = () => {
-        if (window.confirm('Send this normalized transcript and supplied project context to Groq for manual analysis?')) runMeetingAction(meeting.id, 'analyze', { projectContext: context.value });
-      };
-      actions.append(context, analyze);
-      card.append(actions);
+      card.append(renderContextWorkspace(meeting, analysis));
     }
     card.append(node('h3', 'Lifecycle'));
     const history = node('ol', undefined, 'history');
@@ -321,9 +484,19 @@
         const item = node('div', undefined, 'artifact');
         const provenance = artifact.userEdited ? 'user edited' : artifact.isMock ? 'fixture proposal' : 'original Groq proposal';
         item.append(node('strong', artifact.title), node('p', `${readable(artifact.type)} · ${readable(artifact.status)} · ${artifact.confidence} confidence · ${artifact.evidenceState} evidence · ${provenance}`, 'muted'));
+        item.append(node('h4', 'Generated interpretation'));
         for (const [field, value] of Object.entries(artifact.content ?? {})) {
           if (value !== null && (!Array.isArray(value) || value.length)) item.append(node('p', `${readable(field)}: ${displayValue(value)}`));
         }
+        const contextProvenance = node('div', undefined, 'context-provenance');
+        contextProvenance.append(node('h4', 'Retrieved project context'));
+        if (artifact.contextProvenance?.sources?.length) {
+          contextProvenance.append(node('small', `Snapshot ${artifact.contextProvenance.selectionId}`));
+          const sourceList = node('ul');
+          for (const source of artifact.contextProvenance.sources) sourceList.append(node('li', `${source.label} · ${readable(source.kind)} · revision ${source.revision}`));
+          contextProvenance.append(sourceList);
+        } else contextProvenance.append(node('p', 'No retrieved project context informed this proposal.', 'muted'));
+        item.append(contextProvenance, node('h4', 'Transcript evidence'));
         const evidenceList = node('div', undefined, 'evidence-list');
         for (const evidence of artifact.evidence ?? []) {
           const evidenceButton = node('button', `${evidence.speaker} at ${seconds(evidence.startTime)}: “${evidence.text}”`);
@@ -383,6 +556,7 @@
   }
 
   async function loadDashboard() {
+    if (!projectsLoaded) await loadProjects();
     const response = await fetch('/api/dashboard');
     const dashboard = await response.json();
     const root = document.querySelector('#dashboard');
@@ -398,6 +572,21 @@
       const reviewEvents = dashboard.reviewEvents?.filter((event) => event.meetingId === meeting.id) ?? [];
       root.append(renderMeeting(meeting, transcript, artifacts, analysis, reviewEvents));
     }
+  }
+
+  async function loadProjects(force = false) {
+    if (projectsLoaded && !force) return;
+    try {
+      const response = await fetch('/api/projects');
+      const responseBody = await response.json();
+      if (!response.ok) throw new Error(responseBody.error ?? 'Projects could not be loaded.');
+      selectableProjects = responseBody.projects ?? [];
+      projectLoadError = null;
+    } catch (error) {
+      selectableProjects = [];
+      projectLoadError = error.message;
+    }
+    projectsLoaded = true;
   }
 
   document.querySelector('#meeting-form').onsubmit = async (event) => {
@@ -418,6 +607,7 @@
   setInterval(() => {
     const hasUnsavedDashboardInput = document.querySelector('.editor')
       || document.querySelector('.export-panel[data-dirty="true"]')
+      || document.querySelector('.context-workspace[data-dirty="true"]')
       || [...document.querySelectorAll('article textarea')].some((input) => input.value.length > 0);
     if (!hasUnsavedDashboardInput) loadDashboard();
   }, 5000);

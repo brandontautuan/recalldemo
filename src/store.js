@@ -79,11 +79,11 @@ export class JsonStore {
     for (const artifact of artifacts) if (!this.data.artifacts[artifact.id]) this.data.artifacts[artifact.id] = structuredClone(artifact);
     this.persist();
   }
-  beginAnalysis(meetingId) {
+  beginAnalysis(meetingId, metadata = {}) {
     const active = Object.values(this.data.analyses).find((analysis) => analysis.meetingId === meetingId && analysis.status === 'running');
     if (active) return null;
     const now = new Date().toISOString();
-    const analysis = { id: crypto.randomUUID(), meetingId, status: 'running', trigger: 'manual', createdAt: now, updatedAt: now, error: null };
+    const analysis = { id: crypto.randomUUID(), meetingId, status: 'running', trigger: 'manual', contextSelectionId: metadata.contextSelectionId ?? null, contextSelectionSha256: metadata.contextSelectionSha256 ?? null, projectId: metadata.projectId ?? null, createdAt: now, updatedAt: now, error: null };
     this.data.analyses[analysis.id] = analysis;
     this.persist();
     return analysis;

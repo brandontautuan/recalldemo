@@ -443,7 +443,7 @@ The rest of the application should use internal application types instead of raw
 
 ## 9.1 Project Context Retrieval (Required for the bounded-context take-home)
 
-The current inline `projectContext` field is sufficient for ad hoc notes, but it cannot provide the requested repeatable project-context flow. To support seeded project metadata, README excerpts, repository metadata, and existing tickets, the take-home needs a small local project-context store. SQLite is the appropriate persistence layer: it is transactional, portable, supports a checked-in migration/seed workflow, and avoids introducing a managed service for a demo. The existing JSON store remains adequate only for the current transcript/artifact demo and must not be described as supporting retrieved project context.
+The original inline `projectContext` field is sufficient for ad hoc notes, but it cannot provide the requested repeatable project-context flow. To support seeded project metadata, README excerpts, repository metadata, and existing tickets, the take-home uses a small local project-context store. SQLite is the appropriate persistence layer: it is transactional, portable, supports a checked-in migration/seed workflow, and avoids introducing a managed service for a demo. The existing JSON store remains adequate only for the transcript/artifact demo and must not be described as supporting retrieved project context.
 
 This is deliberately a local, deterministic corpus—not a live project-management or repository integration. Seed files are reviewed application inputs. The application does not fetch GitHub, Linear, Jira, or documentation systems during analysis.
 
@@ -835,7 +835,7 @@ The bounded project-context feature requires the following local operational add
 * `DATABASE_PATH` for the SQLite file and `PROJECT_CONTEXT_SEED_PATH` for the local versioned manifest. `PROJECT_CONTEXT_MAX_CHARACTERS` provides a separate selected-context ceiling. Existing `GROQ_MAX_INPUT_CHARACTERS` remains an upper bound on the combined transcript, ad hoc context, and selected snapshot.
 * A persistent writable volume for the SQLite database in any deployed demo. Ephemeral/serverless filesystems are unsuitable unless they mount persistent storage. No new hosted database, queue, worker, cron job, OAuth credential, MCP server, or inbound webhook is required.
 
-The current application has a JSON demonstration store and inline context only. These SQLite, migration, seed, route, and UI-disclosure changes are required implementation work before claiming the retrieved seeded-context flow is available. They are not required to preserve the current inline-context flow.
+The application retains its JSON demonstration store for meetings and artifacts and implements the retrieved seeded-context flow through SQLite migrations, deliberate seeding, deterministic preview routes, and browser disclosure. The inline notes-only flow remains available when a project is not selected.
 
 ### Future production extensions (not required)
 

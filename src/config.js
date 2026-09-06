@@ -17,8 +17,15 @@ export function createConfig(env = process.env) {
   if (!strictGroqModels.has(groqModel)) throw new Error('GROQ_MODEL must support Groq strict structured outputs.');
   const groqMaximumConcurrency = Number(env.GROQ_MAX_CONCURRENCY || 1);
   const groqMaximumInputCharacters = Number(env.GROQ_MAX_INPUT_CHARACTERS || 18_000);
+  const projectContextMaximumCharacters = Number(env.PROJECT_CONTEXT_MAX_CHARACTERS || 12_000);
   if (!Number.isInteger(groqMaximumConcurrency) || groqMaximumConcurrency < 1 || groqMaximumConcurrency > 4) throw new Error('GROQ_MAX_CONCURRENCY must be an integer from 1 to 4.');
   if (!Number.isInteger(groqMaximumInputCharacters) || groqMaximumInputCharacters < 1_000) throw new Error('GROQ_MAX_INPUT_CHARACTERS must be an integer of at least 1000.');
+  if (!Number.isInteger(projectContextMaximumCharacters) || projectContextMaximumCharacters < 1_000 || projectContextMaximumCharacters > 100_000) {
+    throw new Error('PROJECT_CONTEXT_MAX_CHARACTERS must be an integer from 1000 to 100000.');
+  }
+  if (projectContextMaximumCharacters >= groqMaximumInputCharacters) {
+    throw new Error('PROJECT_CONTEXT_MAX_CHARACTERS must be smaller than GROQ_MAX_INPUT_CHARACTERS.');
+  }
   return Object.freeze({
     mockMode,
     region: env.RECALL_REGION,
@@ -30,5 +37,8 @@ export function createConfig(env = process.env) {
     groqModel,
     groqMaximumConcurrency,
     groqMaximumInputCharacters,
+    databasePath: env.DATABASE_PATH || 'data/project-context.sqlite',
+    projectContextSeedPath: env.PROJECT_CONTEXT_SEED_PATH || 'seeds/project-context.example.json',
+    projectContextMaximumCharacters,
   });
 }
