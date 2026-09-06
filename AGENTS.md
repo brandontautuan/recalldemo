@@ -126,6 +126,7 @@ Prefer deterministic tests with mocked Recall responses. Do not make the test su
 
 Before declaring the task complete:
 
+* Run the project's existing automated test suite headlessly for every completed task, including documentation, configuration, and other non-code changes. Do not require a browser window, GUI, interactive prompt, live Recall account, or live LLM. If no headless test command is available or it cannot run, report the reason explicitly rather than silently skipping it.
 * Run the project’s existing test suite.
 * Run linting, formatting, and type checks if available.
 * Test the main user flow manually.

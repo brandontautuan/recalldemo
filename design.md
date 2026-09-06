@@ -74,6 +74,8 @@ Application retrieves completed transcript
     ↓
 Transcript is normalized and ingested
     ↓
+Optional deterministic project-context retrieval
+    ↓
 User explicitly requests bounded Groq engineering analysis
     ↓
 Artifacts are evidence- and schema-validated
@@ -89,9 +91,9 @@ After a verified Recall webhook confirms that a transcript is ready, the applica
 
 ```text
 Recall webhook → Transcript ingestion → Ready state
-    → Explicit user action
-    → Meeting classification
-    → Project-context enrichment
+    → User selects optional project/context preview (no LLM)
+    → Deterministic project-context retrieval
+    → Explicit user confirmation to send the displayed snapshot to Groq
     → Engineering analysis
     → Artifact generation
     → Evidence and schema validation
@@ -99,7 +101,7 @@ Recall webhook → Transcript ingestion → Ready state
     → Approved export
 ```
 
-Each stage receives only the normalized transcript, the bounded output of prior stages, and supplied project context. A failed or invalid stage produces a reviewable failure state; it does not trigger unconstrained retries, autonomous external actions, or unsupported conclusions.
+Each stage receives only the normalized transcript, the bounded output of prior stages, and supplied or retrieved project context. A failed or invalid stage produces a reviewable failure state; it does not trigger unconstrained retries, autonomous external actions, or unsupported conclusions.
 
 ### Calendar-Based Flow
 
@@ -133,7 +135,7 @@ The backend owns Recall credentials, verified webhook ingestion, local persisten
 
 ### Manual analysis pipeline
 
-After an explicit user request, the pipeline classifies a meeting, combines its normalized transcript with explicitly supplied project context, and proposes engineering artifacts through Groq. It never runs automatically after transcript readiness and is bounded by defined stages and structured input/output schemas.
+After an explicit user request, the pipeline combines its normalized transcript with explicitly supplied context and, when the user has selected a project, a deterministic bounded project-context snapshot. It proposes engineering artifacts through Groq. It never runs automatically after transcript readiness and is bounded by defined stages and structured input/output schemas.
 
 ### Deterministic validation
 
@@ -439,17 +441,57 @@ The Recall integration should support:
 
 The rest of the application should use internal application types instead of raw Recall response objects.
 
-## 9.1 Project Context
+## 9.1 Project Context Retrieval (Required for the bounded-context take-home)
 
-Initial project context is explicitly supplied with or before analysis and may include:
+The current inline `projectContext` field is sufficient for ad hoc notes, but it cannot provide the requested repeatable project-context flow. To support seeded project metadata, README excerpts, repository metadata, and existing tickets, the take-home needs a small local project-context store. SQLite is the appropriate persistence layer: it is transactional, portable, supports a checked-in migration/seed workflow, and avoids introducing a managed service for a demo. The existing JSON store remains adequate only for the current transcript/artifact demo and must not be described as supporting retrieved project context.
 
-* Meeting type
-* Project name
-* Project description
-* Existing system information
-* Required ticket format
+This is deliberately a local, deterministic corpus—not a live project-management or repository integration. Seed files are reviewed application inputs. The application does not fetch GitHub, Linear, Jira, or documentation systems during analysis.
 
-The pipeline must distinguish this context from transcript evidence in every generated artifact. Repository retrieval, documentation retrieval, and existing-ticket retrieval are future extensions; none is required for the initial implementation.
+### Required models
+
+```text
+projects
+  id, slug, name, description, terminology_json, ticket_format_json,
+  created_at, updated_at
+
+repositories
+  id, project_id, name, remote_url, default_branch, metadata_json,
+  created_at, updated_at
+
+context_documents
+  id, project_id, repository_id nullable, kind, title, source_path,
+  content, content_sha256, revision, is_active, created_at, updated_at
+
+work_items
+  id, project_id, external_key nullable, title, description, status,
+  priority nullable, labels_json, source_url nullable, updated_at
+
+meeting_project_context
+  meeting_id, project_id, selected_at
+
+context_selections
+  id, meeting_id, analysis_id nullable, project_id, selection_json, content_sha256,
+  character_count, created_at
+```
+
+`kind` is a closed set for this scope: `project_metadata`, `readme_excerpt`, `repository_metadata`, and `work_item_snapshot`. `content_sha256` and the persisted selection snapshot make it possible to show exactly which non-transcript context informed a proposal after a seed changes. A preview selection is created without an `analysis_id` and linked to the resulting analysis only after the user confirms it. Context is supporting background, never transcript evidence; artifact evidence links must still resolve only to normalized transcript utterances.
+
+### Deterministic ingestion and retrieval
+
+A versioned local seed manifest supplies project metadata, repository records, bounded README/document excerpts, and existing-ticket snapshots. A one-shot backend/CLI ingestion command validates the manifest, normalizes whitespace and identifiers, upserts by stable IDs, records content hashes and revisions, and rejects unsupported document kinds or oversized entries. It performs no LLM call, network fetch, or background work.
+
+The user explicitly selects a project when launching a meeting or before analysis. The backend persists that association and, on an explicit context-preview request that makes no LLM call, constructs a context snapshot in this fixed order:
+
+1. Selected project metadata and ticket-format constraints.
+2. Metadata for repositories belonging to that project.
+3. Active README/document excerpts, ordered by explicit manifest priority and stable ID.
+4. Open work items, ordered by deterministic lexical overlap with normalized meeting title, optional user context, and transcript terms; then by manifest priority, `updated_at`, and stable ID. If there is no overlap, include no work items rather than guessing relevance.
+
+The selector uses only deterministic token normalization and ordering; it is not a classifier, embedding search, agent, or LLM. It returns source IDs, labels, revisions, and text under a separate context character budget. If the resulting context does not fit, lower-priority items are omitted and the response records the omission. The analysis request accepts the immutable preview selection ID plus the user's optional ad hoc context, while the existing total Groq input limit remains the final bound. The UI must disclose the selected project/context sources before the existing confirmation dialog and display them separately from transcript evidence.
+
+### MCP decision
+
+MCP is not necessary for this take-home. The only required external calls remain the existing Recall and user-triggered Groq calls. Introducing live MCP calls to repositories, issue trackers, or document stores would add credentials, availability, prompt-injection, freshness, and audit concerns without being needed for seeded, deterministic context. A production connector may use MCP or a direct provider client later, but it must ingest into the same validated local snapshot before analysis; it must never give the model live tool access.
 
 ## 10. Backend Endpoints
 
@@ -474,7 +516,7 @@ GET /api/meetings/:id
 Returns meeting metadata, status, and processing state.
 
 ```text
-POST /api/webhooks/recall
+POST /webhooks/recall
 ```
 
 Receives Recall webhook events.
@@ -484,6 +526,25 @@ GET /api/meetings/:id/transcript
 ```
 
 Returns the normalized transcript.
+
+```text
+GET /api/projects
+GET /api/projects/:id/context
+```
+
+Lists selectable seeded projects and returns the bounded, reviewable context sources for one project. These routes do not contact external systems.
+
+```text
+POST /api/meetings/:id/context-preview
+```
+
+Accepts `{ "projectId": "...", "projectContext": "..." }`, validates the completed meeting and selected project, and creates the deterministic persisted context snapshot described in section 9.1. It does not invoke Groq. The client displays this snapshot and its omissions before requesting analysis.
+
+```text
+POST /api/meetings/:id/analyze
+```
+
+The only Groq-invoking route. It accepts optional `{ "contextSelectionId": "...", "projectContext": "..." }` after transcript completion and user confirmation. The server verifies that the saved selection belongs to the meeting and has not been altered, links it to the analysis job, and includes the persisted bounded snapshot. A client may not submit arbitrary retrieved-document text or source identifiers.
 
 ```text
 GET /api/meetings/:id/artifacts
@@ -516,7 +577,7 @@ POST /api/artifacts/:id/reject
 Rejects an artifact.
 
 ```text
-GET /api/artifacts/:id/export
+POST /api/meetings/:id/export
 ```
 
 Returns a Linear/Jira-compatible JSON representation.
@@ -597,6 +658,12 @@ processingStatus
 
 Webhook events should be persisted or otherwise deduplicated so repeated delivery does not create duplicate meetings, artifacts, or status transitions.
 
+### Project Context
+
+The SQLite schema in section 9.1 is required when the seeded-context feature is enabled. `meeting_project_context` is optional for meetings without a selected project. `context_selections` stores a preview snapshot before confirmation and links it to an analysis only after Groq is invoked; it never stores an unbounded corpus dump.
+
+For the take-home, project context is single-tenant and seeded by a trusted local manifest. No user/organization tables, external-account tokens, sync cursors, vector indexes, or background queues are required.
+
 ## 12. Processing Pipeline
 
 The processing pipeline should be explicit:
@@ -618,7 +685,9 @@ Normalize transcript
     ↓
 Calculate deterministic analytics
     ↓
-Classify meeting and enrich with supplied project context
+Wait for explicit analysis request
+    ↓
+Validate optional selected project and retrieve a deterministic bounded context snapshot
     ↓
 Run bounded engineering analysis and generate structured artifact proposals
     ↓
@@ -637,8 +706,12 @@ The analysis stage should receive only:
 * Participant list
 * Normalized transcript
 * Available timestamps
+* Optional user-entered project notes
+* Optional persisted project-context snapshot, with source IDs and revisions
 * Extraction schema
 * Instructions to avoid unsupported claims, unsupported assignments, and autonomous external actions
+
+Retrieved project context may clarify terminology or existing work, but it must not be converted into transcript evidence. The model is instructed to use it as background only; generated claims remain proposed and require transcript evidence where the artifact schema requires evidence.
 
 ## 13. Analysis Output Rules
 
@@ -663,6 +736,8 @@ The application must handle:
 The analysis stage may propose artifacts, but the user must approve them before export.
 
 The application must clearly label generated content as proposed until reviewed. It must reject or flag artifacts with invalid schemas, missing or invalid evidence, unsupported assignees, invalid timestamps, or claims that cannot be traced to the transcript or supplied project context.
+
+Project context must be sent as a labeled, bounded snapshot rather than merged into transcript utterances. The artifact renderer must identify context-informed interpretation separately; only authoritative stored transcript excerpts may populate an artifact's evidence list.
 
 ## 14. Calendar Scheduling
 
@@ -709,6 +784,11 @@ The application should display clear user-facing errors for:
 * Calendar authentication failure
 * Duplicate calendar event
 * Missing public callback URL
+* Unknown, inactive, or unavailable selected project
+* Invalid project-context seed manifest
+* Context snapshot exceeding its configured bound
+
+If context ingestion or retrieval fails, the manual analysis request fails clearly and does not fall back to live retrieval, an LLM-generated summary, or arbitrary client-provided context documents. A user may retry without selecting a project and use the existing bounded ad hoc context field.
 
 Errors should be logged with enough context to debug them without exposing secrets.
 
@@ -743,6 +823,23 @@ Live mode must remain the primary documented integration path.
 * Avoid recording all calendar events.
 * Explain the recording behavior to the user.
 * Keep the application suitable for demo data rather than claiming enterprise compliance.
+* Treat seeded context documents and ticket snapshots as untrusted data: they are never instructions, are size-limited, and are not exposed to the browser unless selected for a user-confirmed analysis.
+* Keep project-context database files and seed inputs out of public static directories and do not log their full contents.
+
+## 17.1 Take-Home Context Operations
+
+The bounded project-context feature requires the following local operational additions:
+
+* A SQLite migration applied before serving requests, creating the tables in section 9.1 and a schema-version record. The migration is additive; do not mutate existing meeting/transcript/artifact records in place.
+* A deterministic seed command run deliberately by the developer (for example, `npm run seed-context`), after migrations. It is not an application startup task or recurring job.
+* `DATABASE_PATH` for the SQLite file and `PROJECT_CONTEXT_SEED_PATH` for the local versioned manifest. `PROJECT_CONTEXT_MAX_CHARACTERS` provides a separate selected-context ceiling. Existing `GROQ_MAX_INPUT_CHARACTERS` remains an upper bound on the combined transcript, ad hoc context, and selected snapshot.
+* A persistent writable volume for the SQLite database in any deployed demo. Ephemeral/serverless filesystems are unsuitable unless they mount persistent storage. No new hosted database, queue, worker, cron job, OAuth credential, MCP server, or inbound webhook is required.
+
+The current application has a JSON demonstration store and inline context only. These SQLite, migration, seed, route, and UI-disclosure changes are required implementation work before claiming the retrieved seeded-context flow is available. They are not required to preserve the current inline-context flow.
+
+### Future production extensions (not required)
+
+Multi-tenant authorization, encrypted managed storage, document lifecycle/retention policies, repository/Linear/Jira connectors, incremental sync jobs, audit access controls, semantic retrieval, and provider-specific MCP connectors are production extensions. If added, they must write validated, versioned context records before manual analysis and retain the same bounded-snapshot, no-live-tool-access guarantee.
 
 ## 18. Non-Goals
 
@@ -754,6 +851,8 @@ The MVP will not include:
 * Multi-tenant authentication
 * Billing
 * Team permissions
+* Live MCP calls during analysis
+* Live repository, documentation, Linear, or Jira retrieval during analysis
 * Automatic task execution
 * Autonomous code changes
 * Real-time meeting coaching
@@ -801,8 +900,11 @@ The MVP will not include:
 ### Phase 5: Bounded Manual Engineering Analysis
 
 * Define structured schemas for ADRs, action items, bug reports, risks, open questions, proposed acceptance criteria, and ticket drafts.
-* Ingest explicitly supplied project context.
-* Implement bounded meeting classification, context enrichment, engineering analysis, and artifact generation through an explicit manual action after transcript readiness.
+* Preserve the existing bounded ad hoc project-context field.
+* Add the SQLite project-context schema, migration, deterministic seed command, and selected-context snapshot audit record described in section 9.1.
+* Add project selection/context-preview APIs and bind a selected project to the meeting or manual analysis request.
+* Implement deterministic, character-bounded retrieval from seeded metadata, README/document excerpts, repository metadata, and existing work-item snapshots; do not add MCP, embeddings, live provider calls, or a background sync.
+* Implement bounded context retrieval, engineering analysis, and artifact generation through an explicit manual action after transcript readiness.
 * Use Groq as the sole LLM provider and do not invoke it from webhooks, transcript completion, startup, or background work.
 * Enforce backend concurrency, input-size, timeout, retry, and provider-reported rate-limit bounds.
 * Validate generated output, evidence references, timestamps, assignments, and unsupported claims deterministically.
@@ -858,7 +960,8 @@ The project is complete when:
 * Speaker and timestamp information are preserved.
 * Talk-time metrics are calculated deterministically.
 * The user can explicitly start the bounded Groq pipeline, which generates engineering artifact proposals using defined schemas and only transcript evidence plus supplied project context.
-* Generated artifacts link to transcript evidence and distinguish any supplied project context.
+* Where enabled, selected seeded project context is ingested deterministically, retrieved as a persisted bounded snapshot, disclosed before the Groq request, and distinguishable from transcript evidence.
+* Generated artifacts link to transcript evidence and distinguish any supplied or retrieved project context.
 * Users can review, edit, approve, or reject artifacts.
 * Approved action items can be exported as JSON.
 * No artifact automatically creates external tickets, modifies code or documents, assigns people without evidence, or executes external actions.
