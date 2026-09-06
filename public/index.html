@@ -1,1 +1,426 @@
-<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Recall Meeting Bot</title><style>body{font:16px system-ui;max-width:820px;margin:3rem auto;padding:0 1rem;color:#15202b}input,button{font:inherit;padding:.7rem}input{width:100%;box-sizing:border-box;margin:.5rem 0}button{background:#1769e0;color:#fff;border:0;border-radius:.4rem;cursor:pointer}section{border:1px solid #d8e0ea;border-radius:.6rem;padding:1rem;margin:1rem 0}small{color:#52616b}pre{white-space:pre-wrap;background:#f5f7fa;padding:.75rem;border-radius:.4rem}</style><body><h1>Recall Meeting Bot</h1><p>Launch a visible Recall bot for a meeting URL, or add <code>[recall]</code> to the title of a future Google Calendar event to schedule it automatically.</p><section><h2>Join a meeting</h2><form id="bot"><label>Meeting URL<input name="meetingUrl" type="url" required placeholder="https://meet.google.com/..." autocomplete="off"></label><label>Join at (optional)<input name="joinAt" type="datetime-local"></label><button>Schedule bot</button></form><p id="result" role="status"></p></section><section><h2>Meeting status and transcripts</h2><div id="dashboard">Loading…</div></section><script>const dashboard=async()=>{const d=await fetch('/api/dashboard').then(r=>r.json());document.querySelector('#dashboard').innerHTML=`<h3>Scheduled meetings</h3><pre>${JSON.stringify(d.intents,null,2)}</pre><h3>Transcripts</h3><pre>${JSON.stringify(d.transcripts,null,2)}</pre>`};document.querySelector('#bot').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target),joinAt=f.get('joinAt');const r=await fetch('/api/bots',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({meetingUrl:f.get('meetingUrl'),joinAt:joinAt?new Date(joinAt).toISOString():undefined})});document.querySelector('#result').textContent=r.ok?'Bot scheduled.':'Could not schedule bot.';dashboard()};dashboard();setInterval(dashboard,5000)</script></body></html>
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Engineering Decision Pipeline</title>
+<style>
+  :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #172033; background: #f5f7fb; }
+  body { max-width: 1080px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+  header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+  h1, h2, h3, p { margin-top: 0; }
+  section, article { background: white; border: 1px solid #dfe5ef; border-radius: .75rem; padding: 1.25rem; margin: 1rem 0; }
+  label { display: block; font-weight: 650; margin: .75rem 0; }
+  input, select, textarea, button { box-sizing: border-box; width: 100%; font: inherit; padding: .7rem; margin-top: .3rem; }
+  button { width: auto; border: 0; border-radius: .4rem; background: #2459d3; color: white; font-weight: 700; cursor: pointer; }
+  .badge { display: inline-block; padding: .25rem .55rem; border-radius: 999px; background: #e8eefc; color: #173b92; font-size: .8rem; font-weight: 750; }
+  .mock { background: #fff0bd; color: #684b00; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: .75rem; }
+  .metric { background: #f7f9fd; border-radius: .5rem; padding: .75rem; }
+  .metric strong { display: block; font-size: 1.25rem; }
+  .history { padding-left: 1.25rem; }
+  .turn { border-left: 3px solid #2459d3; padding-left: .75rem; margin: 1rem 0; }
+  .artifact { border-left: 3px solid #8d55c7; padding-left: .9rem; margin: 1rem 0; }
+  .artifact-controls, .evidence-list { display: flex; gap: .5rem; flex-wrap: wrap; margin: .5rem 0; }
+  .artifact-controls button, .evidence-list button { font-size: .9rem; padding: .45rem .65rem; }
+  .evidence-list button { background: #e8eefc; color: #173b92; text-align: left; }
+  .editor { background: #f7f9fd; border: 1px solid #dfe5ef; border-radius: .5rem; padding: .75rem; }
+  .export-panel { background: #f7f9fd; }
+  .export-option { display: flex; align-items: center; gap: .5rem; font-weight: 500; }
+  .export-option input { width: auto; margin: 0; }
+  .export-preview { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #172033; color: #f5f7fb; border-radius: .5rem; padding: .75rem; }
+  .highlight { background: #fff0bd; outline: 3px solid #e2b52f; transition: background .2s; }
+  .muted, small { color: #61708a; }
+  .error { color: #a12626; }
+  .actions { display: flex; align-items: end; gap: .5rem; flex-wrap: wrap; margin: .75rem 0; }
+  .actions textarea { flex: 1 1 32rem; }
+  .actions button { background: #42526d; }
+</style>
+<body>
+  <header>
+    <div><h1>Engineering Decision Pipeline</h1><p>Capture a technical meeting with Recall and preserve the evidence behind every follow-up.</p></div>
+    <span id="mode"></span>
+  </header>
+
+  <section>
+    <h2>Launch a meeting bot</h2>
+    <form id="meeting-form">
+      <label>Meeting URL<input name="meetingUrl" type="url" required placeholder="https://meet.google.com/..." autocomplete="off"></label>
+      <label>Meeting title<input name="title" placeholder="Architecture review"></label>
+      <label>Meeting type
+        <select name="meetingType">
+          <option value="architecture_review">Architecture review</option>
+          <option value="sprint_planning">Sprint planning</option>
+          <option value="incident_review">Incident review</option>
+          <option value="bug_triage">Bug triage</option>
+          <option value="general_technical_sync">General technical sync</option>
+        </select>
+      </label>
+      <label>Join at (optional)<input name="joinAt" type="datetime-local"></label>
+      <button>Send Recall bot</button>
+    </form>
+    <p id="form-result" role="status"></p>
+  </section>
+
+  <main id="dashboard"><p>Loading meetings…</p></main>
+
+<script>
+  const node = (tag, text, className) => {
+    const item = document.createElement(tag);
+    if (text !== undefined) item.textContent = text;
+    if (className) item.className = className;
+    return item;
+  };
+  const seconds = (value) => `${Number(value || 0).toFixed(1)}s`;
+  const timestamp = (value) => typeof value?.relative === 'number' ? seconds(value.relative) : value?.absolute ?? 'time unavailable';
+  const readable = (value) => String(value ?? 'unknown').replaceAll('_', ' ');
+  const editableFields = {
+    architecture_decision: [['context', 'Context'], ['decision', 'Decision'], ['consequences', 'Consequences', 'lines']],
+    action_item: [['description', 'Description'], ['assignee', 'Assignee'], ['dueDate', 'Due date'], ['acceptanceCriteria', 'Acceptance criteria', 'lines'], ['priority', 'Priority', 'level']],
+    bug_report: [['description', 'Description'], ['stepsToReproduce', 'Steps to reproduce', 'lines'], ['expectedBehavior', 'Expected behavior'], ['actualBehavior', 'Actual behavior'], ['severity', 'Severity', 'level']],
+    risk: [['description', 'Description'], ['impact', 'Impact', 'level'], ['mitigation', 'Mitigation'], ['owner', 'Owner']],
+    open_question: [['question', 'Question'], ['suggestedOwner', 'Suggested owner']],
+  };
+
+  const displayValue = (value) => Array.isArray(value)
+    ? value.map((item) => typeof item === 'string' ? item : `${item.alternative}: ${item.reason}`).join('; ')
+    : value;
+
+  function jumpToEvidence(utteranceId) {
+    const target = document.getElementById(`utterance-${utteranceId}`);
+    if (!target) {
+      document.querySelector('#form-result').textContent = 'The source transcript utterance is unavailable.';
+      return;
+    }
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.classList.add('highlight');
+    setTimeout(() => target.classList.remove('highlight'), 2200);
+  }
+
+  async function runArtifactAction(artifact, action, payload = {}) {
+    const method = action === 'edit' ? 'PATCH' : 'POST';
+    const path = action === 'edit' ? `/api/artifacts/${encodeURIComponent(artifact.id)}` : `/api/artifacts/${encodeURIComponent(artifact.id)}/${action}`;
+    const response = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedVersion: artifact.version ?? 1, ...payload }) });
+    const responseBody = await response.json();
+    document.querySelector('#form-result').textContent = response.ok ? `${readable(action)} complete.` : `${responseBody.error}${responseBody.issues?.length ? ` ${responseBody.issues.join('; ')}` : ''}`;
+    await loadDashboard();
+  }
+
+  function artifactEditor(artifact, host) {
+    host.querySelector('.editor')?.remove();
+    const form = node('form', undefined, 'editor');
+    const titleLabel = node('label', 'Title');
+    const title = document.createElement('input');
+    title.value = artifact.title;
+    titleLabel.append(title);
+    form.append(titleLabel);
+    const controls = [];
+    for (const [field, label, format] of editableFields[artifact.type] ?? []) {
+      const fieldLabel = node('label', label);
+      let control;
+      if (format === 'level') {
+        control = document.createElement('select');
+        for (const level of ['', 'low', 'medium', 'high', 'critical']) {
+          const option = node('option', level ? readable(level) : 'Not specified');
+          option.value = level;
+          option.selected = artifact.content[field] === level;
+          control.append(option);
+        }
+      } else {
+        control = document.createElement('textarea');
+        control.rows = format === 'lines' ? 3 : 2;
+        control.value = format === 'lines' ? (artifact.content[field] ?? []).join('\n') : artifact.content[field] ?? '';
+      }
+      fieldLabel.append(control);
+      form.append(fieldLabel);
+      controls.push({ field, format, control });
+    }
+    const buttons = node('div', undefined, 'artifact-controls');
+    const save = node('button', 'Save changes');
+    save.type = 'submit';
+    const cancel = node('button', 'Cancel');
+    cancel.type = 'button';
+    cancel.onclick = () => form.remove();
+    buttons.append(save, cancel);
+    form.append(buttons);
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      const content = {};
+      for (const { field, format, control } of controls) content[field] = format === 'lines'
+        ? control.value.split('\n').map((value) => value.trim()).filter(Boolean)
+        : control.value.trim() || null;
+      runArtifactAction(artifact, 'edit', { title: title.value, content });
+    };
+    host.append(form);
+  }
+
+  function renderExportPanel(meeting, artifacts) {
+    const approvedArtifacts = artifacts.filter((artifact) => artifact.status === 'approved');
+    if (!approvedArtifacts.length) return null;
+    const panel = node('section', undefined, 'export-panel');
+    panel.append(node('h3', 'Export approved artifacts'), node('p', 'Select exact approved versions to preview, copy, or download. Nothing is submitted to Linear or Jira.', 'muted'));
+    const selections = [];
+    for (const artifact of approvedArtifacts) {
+      const label = node('label', undefined, 'export-option');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.onchange = () => { panel.dataset.dirty = 'true'; };
+      label.append(checkbox, node('span', `${artifact.title} (v${artifact.version ?? 1})`));
+      panel.append(label);
+      selections.push({ checkbox, artifact });
+    }
+    const formatLabel = node('label', 'Format');
+    const format = document.createElement('select');
+    for (const value of ['canonical', 'linear', 'jira']) {
+      const option = node('option', value === 'canonical' ? 'Canonical application JSON' : `${value[0].toUpperCase()}${value.slice(1)} import draft`);
+      option.value = value;
+      format.append(option);
+    }
+    format.onchange = () => { panel.dataset.dirty = 'true'; };
+    formatLabel.append(format);
+    panel.append(formatLabel);
+    const status = node('p', '', 'muted');
+    const preview = node('pre', '', 'export-preview');
+    preview.hidden = true;
+    const controls = node('div', undefined, 'artifact-controls');
+    const generate = node('button', 'Generate preview');
+    generate.type = 'button';
+    const copy = node('button', 'Copy JSON');
+    copy.type = 'button';
+    copy.hidden = true;
+    const download = node('button', 'Download JSON');
+    download.type = 'button';
+    download.hidden = true;
+    let latestExport = null;
+    generate.onclick = async () => {
+      const selected = selections.filter(({ checkbox }) => checkbox.checked).map(({ artifact }) => ({ artifactId: artifact.id, version: artifact.version ?? 1 }));
+      if (!selected.length) { status.textContent = 'Select at least one approved artifact.'; return; }
+      panel.dataset.dirty = 'true';
+      const response = await fetch(`/api/meetings/${encodeURIComponent(meeting.id)}/export`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ format: format.value, selections: selected }),
+      });
+      const responseBody = await response.json();
+      if (!response.ok) {
+        latestExport = null;
+        preview.hidden = true;
+        copy.hidden = true;
+        download.hidden = true;
+        status.textContent = `${responseBody.error}${responseBody.issues?.length ? ` ${responseBody.issues.join('; ')}` : ''}`;
+        return;
+      }
+      latestExport = { filename: responseBody.filename, json: JSON.stringify(responseBody.export, null, 2) };
+      preview.textContent = latestExport.json;
+      preview.hidden = false;
+      copy.hidden = false;
+      download.hidden = false;
+      status.textContent = `${readable(format.value)} preview generated locally.`;
+    };
+    copy.onclick = async () => {
+      if (!latestExport) return;
+      try {
+        await navigator.clipboard.writeText(latestExport.json);
+        status.textContent = 'JSON copied to the clipboard.';
+      } catch {
+        status.textContent = 'Clipboard access was unavailable. Use the preview or download instead.';
+      }
+    };
+    download.onclick = () => {
+      if (!latestExport) return;
+      const downloadUrl = URL.createObjectURL(new Blob([latestExport.json], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = latestExport.filename;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+      status.textContent = `Downloaded ${latestExport.filename}.`;
+    };
+    controls.append(generate, copy, download);
+    panel.append(controls, status, preview);
+    return panel;
+  }
+
+  function renderAnalytics(analytics) {
+    const section = node('section');
+    section.append(node('h3', 'Deterministic meeting analytics'), node('p', 'Calculated from transcript timestamps; no LLM is used.', 'muted'));
+    const totals = node('div', undefined, 'grid');
+    for (const [label, value] of [
+      ['Meeting duration', seconds(analytics.meetingDurationSeconds)],
+      ['Speaking time', seconds(analytics.totalSpeakingSeconds)],
+      ['Utterances', analytics.utteranceCount],
+      ['Participants', analytics.participantCount],
+    ]) {
+      const metric = node('div', undefined, 'metric');
+      metric.append(node('span', label), node('strong', value));
+      totals.append(metric);
+    }
+    section.append(totals);
+    for (const participant of analytics.participants) {
+      section.append(node('p', `${participant.speakerName}: ${seconds(participant.speakingTimeSeconds)} · ${participant.speakingPercentage}% · ${participant.utteranceCount} utterances`));
+    }
+    return section;
+  }
+
+  function renderMeeting(meeting, transcript, artifacts, analysis, reviewEvents) {
+    const card = node('article');
+    card.append(node('h2', meeting.title || 'Untitled meeting'), node('span', readable(meeting.status), 'badge'));
+    if (meeting.isMock) card.append(node('span', ' Fixture data', 'badge mock'));
+    card.append(node('p', `${readable(meeting.meetingType)} · Bot ${meeting.botId ?? 'not assigned'}`, 'muted'));
+    if (meeting.error) card.append(node('p', `Error: ${meeting.error.subCode ?? meeting.error.code ?? meeting.error.message}`, 'error'));
+    if (!meeting.isMock && meeting.botId) {
+      const actions = node('div', undefined, 'actions');
+      const reconcile = node('button', 'Reconcile status');
+      reconcile.type = 'button';
+      reconcile.onclick = () => runMeetingAction(meeting.id, 'reconcile');
+      actions.append(reconcile);
+      if (meeting.processingStatus === 'failed' || meeting.transcriptStatus === 'failed') {
+        const retry = node('button', 'Retry processing');
+        retry.type = 'button';
+        retry.onclick = () => runMeetingAction(meeting.id, 'process');
+        actions.append(retry);
+      }
+      card.append(actions);
+    }
+    if (transcript?.status === 'done') {
+      const actions = node('div', undefined, 'actions');
+      const context = document.createElement('textarea');
+      context.placeholder = 'Optional project context (constraints, repository details, or terminology)';
+      context.maxLength = 4000;
+      context.rows = 3;
+      const analyze = node('button', analysis?.status === 'running' ? 'Analysis running…' : 'Analyze transcript with Groq');
+      analyze.type = 'button';
+      analyze.disabled = analysis?.status === 'running';
+      analyze.onclick = () => {
+        if (window.confirm('Send this normalized transcript and supplied project context to Groq for manual analysis?')) runMeetingAction(meeting.id, 'analyze', { projectContext: context.value });
+      };
+      actions.append(context, analyze);
+      card.append(actions);
+    }
+    card.append(node('h3', 'Lifecycle'));
+    const history = node('ol', undefined, 'history');
+    for (const entry of meeting.statusHistory ?? []) history.append(node('li', `${readable(entry.status)} — ${new Date(entry.occurredAt).toLocaleString()}`));
+    card.append(history);
+    if (!transcript) card.append(node('p', `Transcript: ${readable(meeting.transcriptStatus)}`, 'muted'));
+    if (transcript?.analytics) card.append(renderAnalytics(transcript.analytics));
+    if (transcript?.status === 'done') {
+      const transcriptSection = node('section');
+      transcriptSection.append(node('h3', 'Normalized transcript'));
+      for (const utterance of transcript.utterances ?? transcript.paragraphs ?? []) {
+        const turn = node('div', undefined, 'turn');
+        turn.id = `utterance-${utterance.id}`;
+        turn.append(node('strong', utterance.speakerName ?? utterance.speaker), node('small', ` · ${timestamp(utterance.startTimestamp)}`), node('p', utterance.text));
+        transcriptSection.append(turn);
+      }
+      card.append(transcriptSection);
+    }
+    if (analysis) card.append(node('p', `Groq analysis: ${readable(analysis.status)}`, analysis.status === 'failed' ? 'error' : 'muted'));
+    if (artifacts.length) {
+      const artifactSection = node('section');
+      artifactSection.append(node('h3', 'AI-generated proposals'), node('p', 'Generated interpretation—review against the linked transcript evidence.', 'muted'));
+      for (const artifact of artifacts) {
+        const item = node('div', undefined, 'artifact');
+        const provenance = artifact.userEdited ? 'user edited' : artifact.isMock ? 'fixture proposal' : 'original Groq proposal';
+        item.append(node('strong', artifact.title), node('p', `${readable(artifact.type)} · ${readable(artifact.status)} · ${artifact.confidence} confidence · ${artifact.evidenceState} evidence · ${provenance}`, 'muted'));
+        for (const [field, value] of Object.entries(artifact.content ?? {})) {
+          if (value !== null && (!Array.isArray(value) || value.length)) item.append(node('p', `${readable(field)}: ${displayValue(value)}`));
+        }
+        const evidenceList = node('div', undefined, 'evidence-list');
+        for (const evidence of artifact.evidence ?? []) {
+          const evidenceButton = node('button', `${evidence.speaker} at ${seconds(evidence.startTime)}: “${evidence.text}”`);
+          evidenceButton.type = 'button';
+          evidenceButton.onclick = () => jumpToEvidence(evidence.utteranceId);
+          evidenceList.append(evidenceButton);
+        }
+        item.append(evidenceList);
+        if (!(artifact.evidence ?? []).length) item.append(node('p', 'No transcript evidence supplied.', 'error'));
+        if (artifact.rejectionNote) item.append(node('p', `Rejection note: ${artifact.rejectionNote}`, 'error'));
+        const controls = node('div', undefined, 'artifact-controls');
+        const edit = node('button', 'Edit');
+        edit.type = 'button';
+        edit.disabled = artifact.status === 'rejected';
+        edit.onclick = () => artifactEditor(artifact, item);
+        const approve = node('button', 'Approve');
+        approve.type = 'button';
+        approve.disabled = artifact.status === 'approved' || artifact.status === 'rejected';
+        approve.onclick = () => runArtifactAction(artifact, 'approve');
+        const reject = node('button', 'Reject');
+        reject.type = 'button';
+        reject.disabled = artifact.status === 'rejected';
+        reject.onclick = () => {
+          if (!window.confirm('Reject this artifact?')) return;
+          const note = window.prompt('Optional rejection note:', '');
+          if (note === null) return;
+          runArtifactAction(artifact, 'reject', { note });
+        };
+        const restore = node('button', 'Restore original');
+        restore.type = 'button';
+        restore.disabled = !artifact.userEdited && artifact.status === 'proposed';
+        restore.onclick = () => {
+          if (window.confirm('Restore the original Groq proposal and reset its review state?')) runArtifactAction(artifact, 'restore');
+        };
+        controls.append(edit, approve, reject, restore);
+        item.append(controls);
+        const history = reviewEvents.filter((event) => event.artifactId === artifact.id);
+        if (history.length) item.append(node('small', `Review history: ${history.map((event) => readable(event.action)).join(' → ')}`));
+        artifactSection.append(item);
+      }
+      card.append(artifactSection);
+    }
+    const exportPanel = renderExportPanel(meeting, artifacts);
+    if (exportPanel) card.append(exportPanel);
+    return card;
+  }
+
+  async function runMeetingAction(meetingId, action, payload) {
+    const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/${action}`, {
+      method: 'POST',
+      headers: payload ? { 'content-type': 'application/json' } : undefined,
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
+    const result = await response.json();
+    document.querySelector('#form-result').textContent = response.ok ? `${readable(action)} complete.` : result.error;
+    await loadDashboard();
+  }
+
+  async function loadDashboard() {
+    const response = await fetch('/api/dashboard');
+    const dashboard = await response.json();
+    const root = document.querySelector('#dashboard');
+    const mode = document.querySelector('#mode');
+    mode.textContent = dashboard.mockMode ? 'MOCK MODE' : 'LIVE MODE';
+    mode.className = dashboard.mockMode ? 'badge mock' : 'badge';
+    root.replaceChildren();
+    if (!dashboard.meetings?.length) root.append(node('p', 'No meetings have been scheduled yet.'));
+    for (const meeting of dashboard.meetings ?? []) {
+      const transcript = dashboard.transcripts?.find((item) => item.meetingId === meeting.id);
+      const artifacts = dashboard.artifacts?.filter((item) => item.meetingId === meeting.id) ?? [];
+      const analysis = dashboard.analyses?.filter((item) => item.meetingId === meeting.id).sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+      const reviewEvents = dashboard.reviewEvents?.filter((event) => event.meetingId === meeting.id) ?? [];
+      root.append(renderMeeting(meeting, transcript, artifacts, analysis, reviewEvents));
+    }
+  }
+
+  document.querySelector('#meeting-form').onsubmit = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const joinAt = form.get('joinAt');
+    const response = await fetch('/api/meetings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ meetingUrl: form.get('meetingUrl'), title: form.get('title'), meetingType: form.get('meetingType'), joinAt: joinAt ? new Date(joinAt).toISOString() : undefined }),
+    });
+    const result = await response.json();
+    document.querySelector('#form-result').textContent = response.ok ? 'Recall bot created.' : result.error;
+    await loadDashboard();
+  };
+
+  loadDashboard();
+  setInterval(() => {
+    const hasUnsavedDashboardInput = document.querySelector('.editor')
+      || document.querySelector('.export-panel[data-dirty="true"]')
+      || [...document.querySelectorAll('article textarea')].some((input) => input.value.length > 0);
+    if (!hasUnsavedDashboardInput) loadDashboard();
+  }, 5000);
+</script>
+</body>
+</html>

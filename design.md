@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Engineering Decision Pipeline is a customer-facing reference application built on top of Recall.ai. Recall owns the meeting infrastructure: visible bot execution, meeting capture, recording, transcription, participant data, and webhook events. This application owns the bounded autonomous engineering-analysis workflow that turns ready transcripts and supplied project context into reviewable engineering artifacts.
+Engineering Decision Pipeline is a customer-facing reference application built on top of Recall.ai. Recall owns the meeting infrastructure: visible bot execution, meeting capture, recording, transcription, participant data, and webhook events. This application owns the bounded, manually initiated engineering-analysis workflow that turns ready transcripts and supplied project context into reviewable engineering artifacts.
 
 The application demonstrates how a developer can use Recall’s meeting infrastructure to turn architecture reviews, sprint planning meetings, incident reviews, and technical discussions into structured engineering artifacts.
 
@@ -19,7 +19,7 @@ The central product principle is:
 
 > Generated engineering artifacts must remain traceable to the conversation that produced them.
 
-The analysis is autonomous within defined stages, structured schemas, and validation rules. It is not an open-ended multi-agent loop and must not claim to know information absent from the transcript or supplied project context.
+After an explicit user request, the analysis runs within defined stages, structured schemas, and validation rules. It is not an open-ended multi-agent loop and must not claim to know information absent from the transcript or supplied project context.
 
 ## 2. Target User
 
@@ -74,7 +74,7 @@ Application retrieves completed transcript
     ↓
 Transcript is normalized and ingested
     ↓
-Bounded autonomous engineering analysis runs
+User explicitly requests bounded Groq engineering analysis
     ↓
 Artifacts are evidence- and schema-validated
     ↓
@@ -83,13 +83,13 @@ User reviews queued artifacts with transcript evidence
 User approves, edits, rejects, or exports artifacts
 ```
 
-### Autonomous Analysis Pipeline
+### Manual Analysis Pipeline
 
-After a verified Recall webhook confirms that a transcript is ready, the application runs this bounded pipeline:
+After a verified Recall webhook confirms that a transcript is ready, the application waits. Only an explicit user action runs this bounded pipeline:
 
 ```text
-Recall webhook
-    → Transcript ingestion
+Recall webhook → Transcript ingestion → Ready state
+    → Explicit user action
     → Meeting classification
     → Project-context enrichment
     → Engineering analysis
@@ -116,7 +116,7 @@ Application schedules a Recall bot
     ↓
 Recall sends webhook status updates
     ↓
-Meeting artifacts are generated after completion
+User may manually request meeting artifacts after completion
 ```
 
 Calendar recording must be opt-in. The application must not record every calendar event by default.
@@ -131,9 +131,9 @@ Recall provides meeting capture, bot execution, recordings, transcription, parti
 
 The backend owns Recall credentials, verified webhook ingestion, local persistence, transcript normalization, project-context handling, and the APIs used by the review interface. It translates Recall resources into internal application models rather than passing raw Recall responses throughout the product.
 
-### Autonomous analysis pipeline
+### Manual analysis pipeline
 
-The pipeline classifies a meeting, combines its normalized transcript with explicitly supplied project context, and proposes engineering artifacts. It may run automatically after transcript readiness, but is bounded by defined stages and structured input/output schemas.
+After an explicit user request, the pipeline classifies a meeting, combines its normalized transcript with explicitly supplied project context, and proposes engineering artifacts through Groq. It never runs automatically after transcript readiness and is bounded by defined stages and structured input/output schemas.
 
 ### Deterministic validation
 
@@ -644,6 +644,10 @@ The analysis stage should receive only:
 
 Generated analysis output must be parsed and validated against a schema.
 
+For Phase 5, Groq is the sole LLM provider. Analysis is initiated only by an explicit user action on a completed normalized transcript. Transcript completion, Recall webhooks, application startup, mock-mode startup, and background processing must never invoke Groq automatically. There is no automatic fallback provider and no feature flag that silently changes providers.
+
+The backend must enforce a small configurable concurrency limit, honor Groq rate-limit response headers and `Retry-After`, bound retry delays within the same manual request, and expose a retryable error when capacity is unavailable. It must not invent local request-per-minute or token-per-minute quotas that can drift from the Groq project's actual limits.
+
 The application must handle:
 
 * Invalid JSON
@@ -794,11 +798,13 @@ The MVP will not include:
 * Calculate talk-time metrics.
 * Add mock transcript support.
 
-### Phase 5: Bounded Autonomous Engineering Analysis
+### Phase 5: Bounded Manual Engineering Analysis
 
 * Define structured schemas for ADRs, action items, bug reports, risks, open questions, proposed acceptance criteria, and ticket drafts.
 * Ingest explicitly supplied project context.
-* Implement bounded meeting classification, context enrichment, engineering analysis, and artifact generation after transcript readiness.
+* Implement bounded meeting classification, context enrichment, engineering analysis, and artifact generation through an explicit manual action after transcript readiness.
+* Use Groq as the sole LLM provider and do not invoke it from webhooks, transcript completion, startup, or background work.
+* Enforce backend concurrency, input-size, timeout, retry, and provider-reported rate-limit bounds.
 * Validate generated output, evidence references, timestamps, assignments, and unsupported claims deterministically.
 * Persist valid proposals in a human review queue and persist invalid results as actionable processing failures.
 
@@ -809,6 +815,8 @@ The MVP will not include:
 * Link artifacts to timestamps.
 * Add approve, edit, and reject actions.
 * Add confidence and evidence states.
+* Preserve immutable original proposals, version user edits, and record append-only review events.
+* Prevent reanalysis from replacing artifacts that have entered a reviewed state.
 
 ### Phase 7: Export
 
@@ -816,6 +824,9 @@ The MVP will not include:
 * Add copy-to-clipboard and download functionality.
 * Document how external systems could consume the payload.
 * Export only user-approved artifacts; do not call external ticket APIs.
+* Require explicit artifact IDs and current versions so stale or cross-meeting selections cannot be exported.
+* Preserve meeting metadata, approval state, provenance, and transcript evidence in the canonical export.
+* Emit explicit mapping hints instead of inventing workspace-specific Linear or Jira identifiers.
 
 ### Phase 8: Calendar Extension
 
@@ -846,7 +857,7 @@ The project is complete when:
 * A completed transcript can be retrieved, normalized, and displayed.
 * Speaker and timestamp information are preserved.
 * Talk-time metrics are calculated deterministically.
-* The bounded autonomous pipeline generates engineering artifact proposals using defined schemas and only transcript evidence plus supplied project context.
+* The user can explicitly start the bounded Groq pipeline, which generates engineering artifact proposals using defined schemas and only transcript evidence plus supplied project context.
 * Generated artifacts link to transcript evidence and distinguish any supplied project context.
 * Users can review, edit, approve, or reject artifacts.
 * Approved action items can be exported as JSON.
@@ -861,7 +872,7 @@ The project is complete when:
 
 The demo should communicate this story:
 
-> Engineering teams already have important technical decisions and commitments inside their meetings. Recall handles the difficult infrastructure of joining, recording, diarizing, and transcribing those meetings. This application runs a bounded autonomous analysis pipeline on the resulting transcript and supplied project context to propose reviewable ADRs, ticket drafts, risks, and open questions while preserving a direct link back to the original conversation. Humans retain approval over every export and every external action.
+> Engineering teams already have important technical decisions and commitments inside their meetings. Recall handles the difficult infrastructure of joining, recording, diarizing, and transcribing those meetings. When a user explicitly requests it, this application runs a bounded Groq analysis pipeline on the resulting transcript and supplied project context to propose reviewable ADRs, ticket drafts, risks, and open questions while preserving a direct link back to the original conversation. Humans retain approval over analysis, every export, and every external action.
 
 The strongest demonstration should show:
 

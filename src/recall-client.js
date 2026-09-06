@@ -1,4 +1,4 @@
-const retryable = new Set([429, 503, 507]);
+const transientReadFailures = new Set([503, 507]);
 
 export class RecallClient {
   constructor(config, fetchImpl = fetch) {
@@ -13,7 +13,8 @@ export class RecallClient {
       headers: { Authorization: this.apiKey, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    if (retryable.has(response.status) && attempt < 3) {
+    const mayRetry = response.status === 429 || (method === 'GET' && transientReadFailures.has(response.status));
+    if (mayRetry && attempt < 3) {
       const retryAfter = Number(response.headers.get('retry-after'));
       const delay = Number.isFinite(retryAfter) ? retryAfter * 1000 : (250 * 2 ** attempt) + Math.random() * 150;
       await new Promise((resolve) => setTimeout(resolve, delay));
@@ -38,7 +39,17 @@ export class RecallClient {
     }});
   }
 
+  getBot(id) { return this.request(`/api/v1/bot/${encodeURIComponent(id)}/`); }
   getTranscript(id) { return this.request(`/api/v1/transcript/${id}/`); }
+  async downloadTranscript(downloadUrl) {
+    const url = new URL(downloadUrl);
+    if (url.protocol !== 'https:' || url.hostname !== `${this.baseUrl.slice('https://'.length)}`) {
+      throw new Error('Recall returned an invalid transcript download URL.');
+    }
+    const response = await this.fetch(url);
+    if (!response.ok) throw new Error(`Recall transcript download failed (${response.status})`);
+    return response.json();
+  }
   listCalendarEvents(calendarId, updatedSince) {
     return this.request(`/api/v2/calendar-events/?calendar_id=${encodeURIComponent(calendarId)}&updated_at__gte=${encodeURIComponent(updatedSince)}`);
   }
