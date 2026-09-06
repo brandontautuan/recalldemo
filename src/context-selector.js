@@ -31,12 +31,13 @@ const repositorySource = (repository) => ({
   kind: 'repository_metadata',
   label: repository.name,
   revision: repository.updatedAt,
+  trackedFiles: Array.isArray(repository.metadata.trackedFiles) ? repository.metadata.trackedFiles : [],
   text: [
     `Repository: ${repository.name}`,
-    `Remote URL: ${repository.remoteUrl}`,
+    repository.remoteUrl === 'https://local.invalid/not-configured' ? null : `Remote URL: ${repository.remoteUrl}`,
     `Default branch: ${repository.defaultBranch}`,
     `Metadata: ${canonicalJson(repository.metadata)}`,
-  ].join('\n'),
+  ].filter(Boolean).join('\n'),
 });
 const documentSource = (document) => ({
   id: `document:${document.id}`,
@@ -44,6 +45,10 @@ const documentSource = (document) => ({
   label: document.title,
   revision: document.revision,
   sourcePath: document.sourcePath,
+  lineStart: document.lineStart ?? null,
+  lineEnd: document.lineEnd ?? null,
+  ingestionId: document.ingestionId ?? null,
+  truncated: Boolean(document.truncated),
   text: document.content,
 });
 const workItemSource = (workItem) => ({

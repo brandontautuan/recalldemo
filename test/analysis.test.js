@@ -25,6 +25,14 @@ export const validArtifact = (patch = {}) => ({
   owner: null,
   question: null,
   suggestedOwner: null,
+  summary: 'Document the migration plan and its validation expectations.',
+  problem: 'The migration behavior is not documented.',
+  whyItMatters: 'Operators need a safe migration and rollback path.',
+  proposedImplementationAreas: ['Migration documentation'],
+  dependencies: [],
+  risks: [],
+  openQuestions: [],
+  repositoryReferences: [],
   evidenceUtteranceIds: ['utterance-1'],
   contextSourceIds: [],
   confidence: 'high',
@@ -47,16 +55,33 @@ test('validates artifacts and hydrates evidence only from stored utterances', ()
 test('validates context provenance against only the immutable selected sources', () => {
   const contextSelection = {
     id: 'selection-1', projectId: 'project-1', contentSha256: 'a'.repeat(64),
-    sources: [{ id: 'document:architecture', kind: 'readme_excerpt', label: 'Architecture', revision: 2, text: 'Background only.' }],
+    sources: [{ id: 'document:architecture', kind: 'readme_excerpt', label: 'Architecture', revision: 2, sourcePath: 'README.md', lineStart: 10, lineEnd: 20, ingestionId: 'ingestion-1', text: 'Background only.' }],
   };
   const [artifact] = validateAndHydrateArtifacts({ artifacts: [validArtifact({ contextSourceIds: ['document:architecture'] })] }, { ...context, contextSelection });
   assert.deepEqual(artifact.contextProvenance, {
     selectionId: 'selection-1', projectId: 'project-1', contentSha256: 'a'.repeat(64),
-    sources: [{ sourceId: 'document:architecture', kind: 'readme_excerpt', label: 'Architecture', revision: 2 }],
+    sources: [{ sourceId: 'document:architecture', kind: 'readme_excerpt', label: 'Architecture', revision: 2, sourcePath: 'README.md', lineStart: 10, lineEnd: 20, ingestionId: 'ingestion-1', truncated: false, trackedFiles: [] }],
   });
   assert.throws(() => validateAndHydrateArtifacts({ artifacts: [validArtifact({ contextSourceIds: ['document:missing'] })] }, { ...context, contextSelection }), /unknown context source/);
   assert.throws(() => validateAndHydrateArtifacts({ artifacts: [validArtifact({ contextSourceIds: ['document:architecture', 'document:architecture'] })] }, { ...context, contextSelection }), /duplicates context source/);
   assert.throws(() => validateAndHydrateArtifacts({ artifacts: [validArtifact({ contextSourceIds: ['document:architecture'] })] }, context), /unknown context source/);
+});
+
+test('accepts only repository references present in approved context', () => {
+  const contextSelection = {
+    id: 'selection-1', projectId: 'project-1', contentSha256: 'a'.repeat(64),
+    sources: [
+      { id: 'document:readme', kind: 'readme_excerpt', label: 'README', revision: 1, sourcePath: 'README.md', lineStart: 1, lineEnd: 20, ingestionId: 'ingestion-1', text: 'Approved excerpt.' },
+      { id: 'repository:repo', kind: 'repository_metadata', label: 'Repo', revision: 'abc', trackedFiles: ['src/service.js'], text: 'Approved paths.' },
+    ],
+  };
+  const references = [
+    { sourceId: 'document:readme', path: 'README.md', lineStart: 1, lineEnd: 20 },
+    { sourceId: 'repository:repo', path: 'src/service.js', lineStart: null, lineEnd: null },
+  ];
+  const [artifact] = validateAndHydrateArtifacts({ artifacts: [validArtifact({ contextSourceIds: ['document:readme', 'repository:repo'], repositoryReferences: references })] }, { ...context, contextSelection });
+  assert.deepEqual(artifact.content.repositoryReferences, references);
+  assert.throws(() => validateAndHydrateArtifacts({ artifacts: [validArtifact({ contextSourceIds: ['repository:repo'], repositoryReferences: [{ sourceId: 'repository:repo', path: 'src/invented.js', lineStart: null, lineEnd: null }] })] }, { ...context, contextSelection }), /not present/);
 });
 
 test('rejects unknown evidence, unsupported assignees, and duplicate artifacts', () => {

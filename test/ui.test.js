@@ -7,6 +7,7 @@ import { createApp } from '../src/app.js';
 import { createConfig } from '../src/config.js';
 import {
   contextPreviewIsCurrent,
+  approveContextPreview,
   contextPreviewPayload,
   createMeetingContextState,
   manualAnalysisPayload,
@@ -26,6 +27,7 @@ test('project context UI requires a matching current preview before selected-con
   assert.throws(() => manualAnalysisPayload(state), /current context preview/);
   state = saveContextPreview(state, { id: 'selection-1', projectId: 'project-event-platform', analysisId: null });
   assert.equal(contextPreviewIsCurrent(state), true);
+  state = approveContextPreview(state, { ...state.preview, approvedAt: '2026-01-01T00:00:00.000Z' });
   assert.deepEqual(manualAnalysisPayload(state), { contextSelectionId: 'selection-1', projectContext: 'Focus on retries.' });
 });
 
@@ -47,6 +49,10 @@ test('dashboard exposes explicit preview, confirmation-only analysis, and separa
   assert.match(contextStateModule, /contextSelectionId/);
   assert.match(indexHtml, /Retrieved project context/);
   assert.match(indexHtml, /Transcript evidence/);
+  assert.match(indexHtml, /Approved local project context/);
+  assert.match(indexHtml, /Scan project context/);
+  assert.match(indexHtml, /Approve collected context/);
+  assert.match(indexHtml, /Approve context snapshot/);
   assert.doesNotMatch(indexHtml, /setInterval\([^]*\/analyze/);
 });
 

@@ -44,6 +44,8 @@
   .context-source summary { cursor: pointer; font-weight: 650; }
   .context-source pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f7f9fd; padding: .65rem; }
   .context-provenance { border-left: 3px solid #2b7a67; background: #f1faf7; padding: .65rem .8rem; margin: .75rem 0; }
+  .scan-preview { border: 1px solid #b9c8e6; border-radius: .5rem; padding: .9rem; margin-top: .75rem; }
+  .scan-preview pre { white-space: pre-wrap; max-height: 16rem; overflow: auto; background: #f7f9fd; padding: .65rem; }
   .artifact h4 { margin-bottom: .35rem; }
   @media (max-width: 700px) { .context-controls { grid-template-columns: 1fr; } }
 </style>
@@ -74,12 +76,36 @@
     <p id="form-result" role="status"></p>
   </section>
 
+  <section>
+    <h2>Approved local project context</h2>
+    <p class="muted">The backend reads only listed documentation files inside server-approved repository roots. Groq never receives a filesystem path or live repository access.</p>
+    <form id="project-form">
+      <label>Project-context admin token<input id="project-admin-token" type="password" required autocomplete="off"></label>
+      <div class="grid">
+        <label>Project slug<input name="slug" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" placeholder="event-platform"></label>
+        <label>Project name<input name="name" required placeholder="Event Platform"></label>
+      </div>
+      <label>Description<textarea name="description" required rows="2"></textarea></label>
+      <label>Local repository path<input name="repositoryPath" required placeholder="/Users/you/code/event-platform" autocomplete="off"></label>
+      <label>Approved documentation paths, one per line<textarea name="approvedFiles" required rows="3">README.md</textarea></label>
+      <button>Create project configuration</button>
+    </form>
+    <div class="actions">
+      <label>Configured project<select id="scan-project"><option value="">Select a configured local project</option></select></label>
+      <button id="scan-project-button" type="button">Scan project context</button>
+    </div>
+    <p id="project-result" role="status"></p>
+    <div id="scan-preview"></div>
+  </section>
+
   <main id="dashboard"><p>Loading meetings…</p></main>
 
 <script type="module">
   import {
     contextPreviewIsCurrent,
+    contextPreviewIsApproved,
     contextPreviewPayload,
+    approveContextPreview,
     createMeetingContextState,
     manualAnalysisPayload,
     saveContextPreview,
@@ -97,7 +123,7 @@
   const readable = (value) => String(value ?? 'unknown').replaceAll('_', ' ');
   const editableFields = {
     architecture_decision: [['context', 'Context'], ['decision', 'Decision'], ['consequences', 'Consequences', 'lines']],
-    action_item: [['description', 'Description'], ['assignee', 'Assignee'], ['dueDate', 'Due date'], ['acceptanceCriteria', 'Acceptance criteria', 'lines'], ['priority', 'Priority', 'level']],
+    action_item: [['summary', 'Summary'], ['problem', 'Problem or requested change'], ['whyItMatters', 'Why it matters'], ['description', 'Description'], ['proposedImplementationAreas', 'Proposed implementation areas', 'lines'], ['acceptanceCriteria', 'Acceptance criteria', 'lines'], ['dependencies', 'Dependencies', 'lines'], ['risks', 'Risks', 'lines'], ['openQuestions', 'Open questions', 'lines'], ['assignee', 'Suggested owner'], ['dueDate', 'Due date'], ['priority', 'Priority', 'level']],
     bug_report: [['description', 'Description'], ['stepsToReproduce', 'Steps to reproduce', 'lines'], ['expectedBehavior', 'Expected behavior'], ['actualBehavior', 'Actual behavior'], ['severity', 'Severity', 'level']],
     risk: [['description', 'Description'], ['impact', 'Impact', 'level'], ['mitigation', 'Mitigation'], ['owner', 'Owner']],
     open_question: [['question', 'Question'], ['suggestedOwner', 'Suggested owner']],
@@ -106,9 +132,46 @@
   let selectableProjects = [];
   let projectsLoaded = false;
   let projectLoadError = null;
+  const projectAdminHeaders = (extra = {}) => ({ ...extra, 'x-project-context-admin-token': document.querySelector('#project-admin-token').value });
+
+  function refreshProjectScanPicker() {
+    const picker = document.querySelector('#scan-project');
+    const selected = picker.value;
+    picker.replaceChildren(Object.assign(node('option', 'Select a configured local project'), { value: '' }));
+    for (const project of selectableProjects.filter((item) => item.localRepositories?.length)) {
+      picker.append(Object.assign(node('option', `${project.name} — ${project.localRepositories[0].name}`), { value: project.id }));
+    }
+    picker.value = selectableProjects.some((item) => item.id === selected) ? selected : '';
+  }
+
+  function renderIngestionPreview(ingestion) {
+    const host = document.querySelector('#scan-preview');
+    const panel = node('div', undefined, 'scan-preview');
+    panel.append(
+      node('h3', ingestion.status === 'approved' ? 'Approved context ingestion' : 'Pending context ingestion'),
+      node('p', `Commit/version: ${ingestion.commitVersion ?? 'not available'} · fingerprint ${ingestion.sourceFingerprint}`, 'muted'),
+      node('p', `${ingestion.trackedFiles.length} bounded tracked file paths collected as repository metadata. Review every excerpt before approval.`, 'muted'),
+    );
+    for (const document of ingestion.documents) {
+      panel.append(node('h4', `${document.sourcePath}:${document.lineStart}-${document.lineEnd}${document.truncated ? ' · truncated to configured bound' : ''}`), node('pre', document.content));
+    }
+    const approve = node('button', ingestion.status === 'approved' ? 'Context ingestion approved' : 'Approve collected context');
+    approve.type = 'button';
+    approve.disabled = ingestion.status !== 'pending_review';
+    approve.onclick = async () => {
+      if (!window.confirm('Approve these exact excerpts and file references for future meeting analysis?')) return;
+      const response = await fetch(`/api/projects/${encodeURIComponent(ingestion.projectId)}/ingestions/${encodeURIComponent(ingestion.id)}/approve`, { method: 'POST', headers: projectAdminHeaders() });
+      const body = await response.json();
+      document.querySelector('#project-result').textContent = response.ok ? 'Repository context approved.' : body.error;
+      if (response.ok) renderIngestionPreview(body.ingestion);
+      await loadProjects(true);
+    };
+    panel.append(approve);
+    host.replaceChildren(panel);
+  }
 
   const displayValue = (value) => Array.isArray(value)
-    ? value.map((item) => typeof item === 'string' ? item : `${item.alternative}: ${item.reason}`).join('; ')
+    ? value.map((item) => typeof item === 'string' ? item : item.path ? `${item.path}${item.lineStart ? `:${item.lineStart}-${item.lineEnd}` : ''}` : `${item.alternative}: ${item.reason}`).join('; ')
     : value;
 
   function jumpToEvidence(utteranceId) {
@@ -297,7 +360,8 @@
     panel.append(node('strong', `Included sources (${preview.sources.length})`));
     for (const source of preview.sources) {
       const details = node('details', undefined, 'context-source');
-      details.append(node('summary', `${source.label} · ${readable(source.kind)} · revision ${source.revision}`));
+      const location = source.sourcePath ? ` · ${source.sourcePath}${source.lineStart ? `:${source.lineStart}-${source.lineEnd}` : ''}${source.truncated ? ' · truncated' : ''}` : '';
+      details.append(node('summary', `${source.label} · ${readable(source.kind)} · revision ${source.revision}${location}`));
       details.append(node('pre', source.text));
       panel.append(details);
     }
@@ -347,6 +411,8 @@
     const actions = node('div', undefined, 'artifact-controls');
     const previewButton = node('button', state.busy === 'preview' ? 'Creating preview…' : 'Preview selected context');
     previewButton.type = 'button';
+    const approveContextButton = node('button', 'Approve context snapshot');
+    approveContextButton.type = 'button';
     const analyzeButton = node('button', state.busy === 'analysis' || analysis?.status === 'running' ? 'Analysis running…' : 'Analyze transcript with Groq');
     analyzeButton.type = 'button';
     const retryProjects = node('button', 'Retry project loading');
@@ -362,15 +428,19 @@
     };
     const sync = () => {
       const previewCurrent = contextPreviewIsCurrent(state);
+      const previewApproved = contextPreviewIsApproved(state);
       project.disabled = Boolean(projectLoadError) || state.busy !== null;
       notes.disabled = state.busy !== null;
       previewButton.disabled = !state.projectId || state.busy !== null || analysis?.status === 'running';
-      analyzeButton.disabled = state.busy !== null || analysis?.status === 'running' || (Boolean(state.projectId) && !previewCurrent);
+      approveContextButton.hidden = !state.projectId;
+      approveContextButton.disabled = !previewCurrent || previewApproved || state.busy !== null;
+      approveContextButton.textContent = previewApproved ? 'Context snapshot approved' : 'Approve context snapshot';
+      analyzeButton.disabled = state.busy !== null || analysis?.status === 'running' || (Boolean(state.projectId) && !previewApproved);
       analyzeButton.textContent = state.busy === 'analysis' || analysis?.status === 'running'
         ? 'Analysis running…'
-        : state.projectId && !previewCurrent ? 'Preview context before analysis' : 'Analyze transcript with Groq';
+        : state.projectId && !previewApproved ? 'Approve context before analysis' : 'Analyze transcript with Groq';
       status.className = state.error ? 'error' : 'muted';
-      status.textContent = state.error ?? (previewCurrent ? 'Preview is current and ready for explicit confirmation.' : projectLoadError ?? 'Groq runs only after you click Analyze and confirm.');
+      status.textContent = state.error ?? (previewApproved ? 'Approved snapshot is ready for explicit Groq confirmation.' : previewCurrent ? 'Review and approve this exact snapshot before analysis.' : projectLoadError ?? 'Groq runs only after you click Analyze and confirm.');
       previewHost.replaceChildren();
       if (previewCurrent) previewHost.append(renderContextPreview(state.preview));
       workspace.dataset.dirty = state.projectId || state.projectContext ? 'true' : 'false';
@@ -398,6 +468,20 @@
         saveState(saveContextPreview(state, responseBody.contextSelection));
       } catch (error) {
         saveState({ ...state, busy: null, preview: null, previewProjectContext: null, error: error.message });
+      }
+      sync();
+    };
+    approveContextButton.onclick = async () => {
+      if (!contextPreviewIsCurrent(state) || !window.confirm('Approve this exact bounded context snapshot for the next analysis request?')) return;
+      saveState({ ...state, busy: 'approval', error: null });
+      sync();
+      try {
+        const response = await fetch(`/api/meetings/${encodeURIComponent(meeting.id)}/context-preview/${encodeURIComponent(state.preview.id)}/approve`, { method: 'POST' });
+        const responseBody = await response.json();
+        if (!response.ok) throw new Error(responseBody.error ?? 'Context approval failed.');
+        saveState(approveContextPreview({ ...state, busy: null }, responseBody.contextSelection));
+      } catch (error) {
+        saveState({ ...state, busy: null, error: error.message });
       }
       sync();
     };
@@ -433,7 +517,7 @@
       await loadProjects(true);
       await loadDashboard();
     };
-    actions.append(previewButton, analyzeButton, retryProjects);
+    actions.append(previewButton, approveContextButton, analyzeButton, retryProjects);
     workspace.append(actions, status, previewHost);
     sync();
     return workspace;
@@ -501,7 +585,10 @@
         if (artifact.contextProvenance?.sources?.length) {
           contextProvenance.append(node('small', `Snapshot ${artifact.contextProvenance.selectionId}`));
           const sourceList = node('ul');
-          for (const source of artifact.contextProvenance.sources) sourceList.append(node('li', `${source.label} · ${readable(source.kind)} · revision ${source.revision}`));
+          for (const source of artifact.contextProvenance.sources) {
+            const location = source.sourcePath ? ` · ${source.sourcePath}${source.lineStart ? `:${source.lineStart}-${source.lineEnd}` : ''}` : '';
+            sourceList.append(node('li', `${source.label} · ${readable(source.kind)} · revision ${source.revision}${location}${source.truncated ? ' · truncated' : ''}`));
+          }
           contextProvenance.append(sourceList);
         } else contextProvenance.append(node('p', 'No retrieved project context informed this proposal.', 'muted'));
         item.append(contextProvenance, node('h4', 'Transcript evidence'));
@@ -596,6 +683,7 @@
       projectLoadError = error.message;
     }
     projectsLoaded = true;
+    refreshProjectScanPicker();
   }
 
   document.querySelector('#meeting-form').onsubmit = async (event) => {
@@ -610,6 +698,40 @@
     const result = await response.json();
     document.querySelector('#form-result').textContent = response.ok ? 'Recall bot created.' : result.error;
     await loadDashboard();
+  };
+
+  document.querySelector('#project-form').onsubmit = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const approvedFiles = String(form.get('approvedFiles')).split('\n').map((value) => value.trim()).filter(Boolean);
+    const adminToken = document.querySelector('#project-admin-token').value;
+    const response = await fetch('/api/projects/local', {
+      method: 'POST', headers: projectAdminHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ slug: form.get('slug'), name: form.get('name'), description: form.get('description'), repositoryPath: form.get('repositoryPath'), approvedFiles }),
+    });
+    const result = await response.json();
+    document.querySelector('#project-result').textContent = response.ok ? 'Project configured. Run a scan to review its context.' : result.error;
+    if (response.ok) {
+      event.target.reset();
+      document.querySelector('#project-admin-token').value = adminToken;
+      event.target.elements.approvedFiles.value = 'README.md';
+      await loadProjects(true);
+      document.querySelector('#scan-project').value = result.project.id;
+    }
+  };
+
+  document.querySelector('#scan-project-button').onclick = async () => {
+    const projectId = document.querySelector('#scan-project').value;
+    const project = selectableProjects.find((item) => item.id === projectId);
+    const repository = project?.localRepositories?.[0];
+    if (!repository) { document.querySelector('#project-result').textContent = 'Select a configured local project.'; return; }
+    document.querySelector('#project-result').textContent = 'Scanning only approved documentation…';
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/repositories/${encodeURIComponent(repository.id)}/scan`, { method: 'POST', headers: projectAdminHeaders() });
+    const result = await response.json();
+    document.querySelector('#project-result').textContent = response.ok
+      ? result.ingestion.status === 'approved' ? 'Repository matches the currently approved ingestion.' : 'Scan staged for review; nothing is active yet.'
+      : result.error;
+    if (response.ok) renderIngestionPreview(result.ingestion);
   };
 
   document.querySelector('#reset-demo').onclick = async (event) => {

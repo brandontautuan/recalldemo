@@ -33,6 +33,7 @@ test('configuration validates bounded project-context storage settings', () => {
   assert.equal(config.projectContextMaximumCharacters, 12_000);
   assert.throws(() => createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', PROJECT_CONTEXT_MAX_CHARACTERS: '999' }), /integer from 1000/);
   assert.throws(() => createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', GROQ_MAX_INPUT_CHARACTERS: '12000', PROJECT_CONTEXT_MAX_CHARACTERS: '12000' }), /must be smaller/);
+  assert.throws(() => createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', PROJECT_REPOSITORY_ROOTS: '/tmp' }), /ADMIN_TOKEN/);
 });
 test('only future tagged calendar events with a meeting URL are eligible', () => {
   const future = new Date(Date.now() + 60_000).toISOString();
@@ -162,6 +163,8 @@ test('runs Groq analysis only through the explicit manual endpoint and persists 
       type: 'action_item', title: 'Document the migration plan', status: 'proposed', description: 'Write the event-model migration and its acceptance checks.', context: null, decision: null,
       alternativesRejected: [], consequences: [], assignee: 'Ada', dueDate: null, acceptanceCriteria: ['The migration and rollback steps are documented.'], priority: 'medium',
       stepsToReproduce: [], expectedBehavior: null, actualBehavior: null, severity: null, impact: null, mitigation: null, owner: null, question: null, suggestedOwner: null,
+      summary: 'Document the migration plan.', problem: 'Migration steps are undocumented.', whyItMatters: 'Safe rollout requires an agreed plan.', proposedImplementationAreas: [], dependencies: [], risks: [], openQuestions: [],
+      repositoryReferences: [],
       evidenceUtteranceIds: ['utterance-1'], contextSourceIds: [], confidence: 'high',
     }] } };
   } };

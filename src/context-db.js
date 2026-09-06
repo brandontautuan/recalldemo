@@ -192,7 +192,42 @@ export class ProjectContextStore {
   }
 
   listProjects() {
-    return this.database.prepare('SELECT id, slug, name, description, updated_at AS updatedAt FROM projects WHERE is_active = 1 ORDER BY name, id').all();
+    return this.database.prepare('SELECT id, slug, name, description, updated_at AS updatedAt FROM projects WHERE is_active = 1 ORDER BY name, id').all().map((project) => ({
+      ...project,
+      localRepositories: this.database.prepare('SELECT id, name, approved_files_json AS approvedFilesJson FROM repositories WHERE project_id = ? AND local_path IS NOT NULL ORDER BY id').all(project.id)
+        .map(({ approvedFilesJson, ...repository }) => {
+          const latest = this.database.prepare('SELECT id, status, commit_version AS commitVersion, source_fingerprint AS sourceFingerprint, created_at AS createdAt, approved_at AS approvedAt FROM context_ingestions WHERE repository_id = ? ORDER BY created_at DESC LIMIT 1').get(repository.id) ?? null;
+          return { ...repository, configured: true, approvedFiles: JSON.parse(approvedFilesJson), latestIngestion: latest };
+        }),
+    }));
+  }
+
+  localRepositoriesRequireApproval(projectId) {
+    const repositories = this.database.prepare('SELECT id FROM repositories WHERE project_id = ? AND local_path IS NOT NULL').all(projectId);
+    return repositories.some((repository) => !this.database.prepare("SELECT 1 FROM context_ingestions WHERE repository_id = ? AND status = 'approved'").get(repository.id));
+  }
+
+  approvedContextIngestion(repositoryId) {
+    const row = this.database.prepare("SELECT id FROM context_ingestions WHERE repository_id = ? AND status = 'approved' ORDER BY approved_at DESC LIMIT 1").get(repositoryId);
+    return row ? this.getContextIngestion(row.id) : null;
+  }
+
+  createLocalProject({ slug, name, description, repositoryPath, approvedFiles }) {
+    const projectId = `project-${slug}`;
+    const repositoryId = `repo-${slug}`;
+    const now = new Date().toISOString();
+    this.database.exec('BEGIN IMMEDIATE;');
+    try {
+      this.database.prepare('INSERT INTO projects (id, slug, name, description, terminology_json, ticket_format_json, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)')
+        .run(projectId, slug, name, description, '{}', JSON.stringify({ requiredSections: ['Summary', 'Acceptance criteria', 'Evidence'] }), now, now);
+      this.database.prepare('INSERT INTO repositories (id, project_id, name, remote_url, default_branch, metadata_json, created_at, updated_at, local_path, approved_files_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(repositoryId, projectId, slug, 'https://local.invalid/not-configured', 'unknown', JSON.stringify({ source: 'approved_local_repository' }), now, now, repositoryPath, JSON.stringify(approvedFiles));
+      this.database.exec('COMMIT;');
+      return this.getProject(projectId);
+    } catch (error) {
+      this.database.exec('ROLLBACK;');
+      throw error;
+    }
   }
 
   getProject(id) {
@@ -210,12 +245,13 @@ export class ProjectContextStore {
     if (!project) return null;
     const repositories = this.database.prepare('SELECT * FROM repositories WHERE project_id = ? ORDER BY id').all(projectId).map((row) => ({
       id: row.id, projectId: row.project_id, name: row.name, remoteUrl: row.remote_url, defaultBranch: row.default_branch,
-      metadata: JSON.parse(row.metadata_json), createdAt: row.created_at, updatedAt: row.updated_at,
+      metadata: JSON.parse(row.metadata_json), localPath: row.local_path, approvedFiles: JSON.parse(row.approved_files_json), createdAt: row.created_at, updatedAt: row.updated_at,
     }));
     const documents = this.database.prepare('SELECT * FROM context_documents WHERE project_id = ? ORDER BY selection_priority, id').all(projectId).map((row) => ({
       id: row.id, projectId: row.project_id, repositoryId: row.repository_id, kind: row.kind, title: row.title,
       sourcePath: row.source_path, content: row.content, contentSha256: row.content_sha256, revision: row.revision,
-      selectionPriority: row.selection_priority, isActive: Boolean(row.is_active), createdAt: row.created_at, updatedAt: row.updated_at,
+      selectionPriority: row.selection_priority, isActive: Boolean(row.is_active), ingestionId: row.ingestion_id,
+      lineStart: row.line_start, lineEnd: row.line_end, truncated: Boolean(row.is_truncated), approvedAt: row.approved_at, createdAt: row.created_at, updatedAt: row.updated_at,
     }));
     const workItems = this.database.prepare('SELECT * FROM work_items WHERE project_id = ? ORDER BY selection_priority, updated_at DESC, id').all(projectId).map((row) => ({
       id: row.id, projectId: row.project_id, externalKey: row.external_key, title: row.title, description: row.description,
@@ -255,7 +291,7 @@ export class ProjectContextStore {
       this.database.exec('ROLLBACK;');
       throw error;
     }
-    return { ...selection, id, meetingId, analysisId: null, projectId, contentSha256, createdAt };
+    return { ...selection, id, meetingId, analysisId: null, projectId, contentSha256, createdAt, approvedAt: null };
   }
 
   getContextSelection(id) {
@@ -265,13 +301,85 @@ export class ProjectContextStore {
     if (checksum(canonicalJson(selection)) !== row.content_sha256
       || selection.project?.id !== row.project_id
       || selection.characterCount !== row.character_count) throw new ContextSelectionIntegrityError(id);
-    return { ...selection, id: row.id, meetingId: row.meeting_id, analysisId: row.analysis_id, projectId: row.project_id, contentSha256: row.content_sha256, createdAt: row.created_at };
+    return { ...selection, id: row.id, meetingId: row.meeting_id, analysisId: row.analysis_id, projectId: row.project_id, contentSha256: row.content_sha256, createdAt: row.created_at, approvedAt: row.approved_at };
+  }
+
+  approveContextSelection(id, meetingId) {
+    const approvedAt = new Date().toISOString();
+    const update = this.database.prepare('UPDATE context_selections SET approved_at = ? WHERE id = ? AND meeting_id = ? AND approved_at IS NULL AND analysis_id IS NULL')
+      .run(approvedAt, id, meetingId);
+    return Number(update.changes) === 1 ? this.getContextSelection(id) : null;
+  }
+
+  contextSelectionUsesCurrentIngestions(selection) {
+    return selection.sources.every((source) => {
+      if (!source.ingestionId) return true;
+      return Boolean(this.database.prepare("SELECT 1 FROM context_ingestions WHERE id = ? AND status = 'approved'").get(source.ingestionId));
+    });
   }
 
   linkContextSelectionToAnalysis(id, analysisId) {
-    const update = this.database.prepare('UPDATE context_selections SET analysis_id = ? WHERE id = ? AND analysis_id IS NULL').run(analysisId, id);
+    const update = this.database.prepare('UPDATE context_selections SET analysis_id = ? WHERE id = ? AND analysis_id IS NULL AND approved_at IS NOT NULL').run(analysisId, id);
     if (Number(update.changes) !== 1) return false;
     return true;
+  }
+
+
+  stageRepositoryIngestion({ projectId, repositoryId, scan }) {
+    const existing = this.database.prepare("SELECT id FROM context_ingestions WHERE project_id = ? AND repository_id = ? AND source_fingerprint = ? AND status IN ('pending_review', 'approved') ORDER BY created_at DESC LIMIT 1")
+      .get(projectId, repositoryId, scan.sourceFingerprint);
+    if (existing) return this.getContextIngestion(existing.id);
+    const id = crypto.randomUUID();
+    this.database.exec('BEGIN IMMEDIATE;');
+    try {
+      this.database.prepare('INSERT INTO context_ingestions (id, project_id, repository_id, status, commit_version, source_fingerprint, tracked_files_json, created_at, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)')
+        .run(id, projectId, repositoryId, 'pending_review', scan.commitVersion, scan.sourceFingerprint, JSON.stringify(scan.trackedFiles), scan.scannedAt);
+      const insert = this.database.prepare('INSERT INTO context_documents (id, project_id, repository_id, kind, title, source_path, content, content_sha256, revision, selection_priority, is_active, created_at, updated_at, ingestion_id, line_start, line_end, approved_at, is_truncated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?, ?, ?, ?, NULL, ?)');
+      scan.documents.forEach((document, index) => insert.run(crypto.randomUUID(), projectId, repositoryId, document.kind, document.title, document.sourcePath, document.content, document.contentSha256, 100 + index, scan.scannedAt, scan.scannedAt, id, document.lineStart, document.lineEnd, document.truncated ? 1 : 0));
+      this.database.exec('COMMIT;');
+      return this.getContextIngestion(id);
+    } catch (error) {
+      this.database.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  getContextIngestion(id) {
+    const row = this.database.prepare('SELECT * FROM context_ingestions WHERE id = ?').get(id);
+    if (!row) return null;
+    const documents = this.database.prepare('SELECT id, kind, title, source_path AS sourcePath, content, content_sha256 AS contentSha256, line_start AS lineStart, line_end AS lineEnd, is_truncated AS isTruncated FROM context_documents WHERE ingestion_id = ? ORDER BY selection_priority, id').all(id)
+      .map(({ isTruncated, ...document }) => ({ ...document, truncated: Boolean(isTruncated) }));
+    return { id: row.id, projectId: row.project_id, repositoryId: row.repository_id, status: row.status, commitVersion: row.commit_version, sourceFingerprint: row.source_fingerprint, trackedFiles: JSON.parse(row.tracked_files_json), createdAt: row.created_at, approvedAt: row.approved_at, documents };
+  }
+
+  approveContextIngestion(id, projectId) {
+    const ingestion = this.getContextIngestion(id);
+    if (!ingestion || ingestion.projectId !== projectId || ingestion.status !== 'pending_review') return null;
+    const approvedAt = new Date().toISOString();
+    this.database.exec('BEGIN IMMEDIATE;');
+    try {
+      this.database.prepare("UPDATE context_ingestions SET status = 'superseded' WHERE project_id = ? AND repository_id = ? AND status = 'approved'").run(projectId, ingestion.repositoryId);
+      this.database.prepare('UPDATE context_documents SET is_active = 0 WHERE project_id = ? AND repository_id = ? AND ingestion_id IS NOT NULL').run(projectId, ingestion.repositoryId);
+      this.database.prepare("UPDATE context_ingestions SET status = 'approved', approved_at = ? WHERE id = ?").run(approvedAt, id);
+      this.database.prepare('UPDATE context_documents SET is_active = 1, approved_at = ? WHERE ingestion_id = ?').run(approvedAt, id);
+      this.database.prepare('UPDATE repositories SET metadata_json = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify({ source: 'approved_local_repository', commitVersion: ingestion.commitVersion, trackedFiles: ingestion.trackedFiles }), approvedAt, ingestion.repositoryId);
+      this.database.exec('COMMIT;');
+      return this.getContextIngestion(id);
+    } catch (error) {
+      this.database.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  beginAnalysisRun({ id, meetingId, projectId = null, contextSelectionId = null }) {
+    this.database.prepare("INSERT INTO analysis_runs (id, meeting_id, project_id, context_selection_id, status, provider, created_at) VALUES (?, ?, ?, ?, 'running', 'groq', ?)")
+      .run(id, meetingId, projectId, contextSelectionId, new Date().toISOString());
+  }
+
+  finishAnalysisRun(id, { status, model = null, errorCode = null }) {
+    this.database.prepare('UPDATE analysis_runs SET status = ?, model = ?, error_code = ?, completed_at = ? WHERE id = ?')
+      .run(status, model, errorCode, new Date().toISOString(), id);
   }
 
   close() {

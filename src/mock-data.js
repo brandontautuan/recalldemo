@@ -38,6 +38,14 @@ const emptyArtifactContent = {
   owner: null,
   question: null,
   suggestedOwner: null,
+  summary: null,
+  problem: null,
+  whyItMatters: null,
+  proposedImplementationAreas: [],
+  dependencies: [],
+  risks: [],
+  openQuestions: [],
+  repositoryReferences: [],
 };
 const mockArtifact = ({ id, type, title, content, evidenceIndexes, confidence = 'high' }) => {
   const artifactContent = { ...emptyArtifactContent, ...content };

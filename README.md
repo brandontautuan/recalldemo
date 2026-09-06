@@ -12,11 +12,12 @@ Groq analysis is manual only. No Recall webhook, transcript completion event, ap
 4. After `recording.done`, the backend requests asynchronous transcription.
 5. After `transcript.done`, the backend downloads and normalizes the transcript.
 6. The dashboard displays lifecycle history, transcript utterances, and deterministic analytics.
-7. Optionally select a seeded project, enter ad hoc notes, and click **Preview selected context**. Review the included source text, revisions, omissions, and character budget; previewing does not call Groq.
-8. Click **Analyze transcript with Groq** and confirm the disclosure. The browser sends the immutable preview ID and matching notes only after this explicit action. The notes-only path remains available without a selected project.
-9. The backend validates Groq's structured result and displays proposed artifacts with retrieved-context provenance separately from transcript evidence.
-10. Review each artifact, jump to its supporting utterances, and edit, approve, reject, or restore it.
-11. Select exact approved artifact versions, preview canonical/Linear/Jira JSON, then copy or download it locally.
+7. Optionally create a local project configuration whose repository path is inside `PROJECT_REPOSITORY_ROOTS`, then scan and approve only its listed documentation files. No LLM runs during ingestion.
+8. Select a project, enter ad hoc notes, and click **Preview selected context**. Review and explicitly approve the included source text, revisions, paths, line ranges, omissions, and character budget.
+9. Click **Analyze transcript with Groq** and confirm the disclosure. The browser sends the approved immutable preview ID and matching notes only after this explicit action. The notes-only path remains available without a selected project.
+10. The backend validates Groq's structured result and displays proposed artifacts with retrieved-context provenance separately from transcript evidence.
+11. Review each artifact, jump to its supporting utterances, and edit, approve, reject, or restore it.
+12. Select exact approved artifact versions, preview canonical/Linear/Jira JSON, then copy or download it locally.
 
 ```text
 User
@@ -46,6 +47,7 @@ User
 - `src/context-db.js` owns the separate local SQLite project-context schema, checksummed migrations, and transactional seed upserts.
 - `src/context-seed.js` strictly validates, normalizes, and hashes the reviewed local project-context manifest without network access.
 - `src/context-selector.js` builds persisted, immutable context previews using fixed source ordering, deterministic lexical overlap, and an independent character ceiling.
+- `src/repository-context.js` validates server-approved local roots, reads only explicitly listed documentation, records bounded line ranges and Git metadata, and never exposes filesystem access to Groq.
 - `src/app.js` validates HTTP input, accepts signed webhooks, coordinates processing, and serves application APIs.
 - `src/mock-data.js` contains clearly labeled fixture meeting, lifecycle, transcript, and analytics data.
 - `public/index.html` renders the meeting launcher and dashboard without exposing Recall credentials.
@@ -106,11 +108,18 @@ Local project-context foundation:
 DATABASE_PATH=data/project-context.sqlite
 PROJECT_CONTEXT_SEED_PATH=seeds/project-context.example.json
 PROJECT_CONTEXT_MAX_CHARACTERS=12000
+PROJECT_REPOSITORY_ROOTS=/Users/you/code
+PROJECT_CONTEXT_ADMIN_TOKEN=replace-with-a-long-local-admin-token
+PROJECT_SCAN_MAX_FILES=20
+PROJECT_SCAN_MAX_FILE_BYTES=100000
+PROJECT_SCAN_MAX_FILE_CHARACTERS=6000
 ```
 
 `GROQ_MODEL` is restricted to Groq models used here with strict structured outputs: `openai/gpt-oss-20b` or `openai/gpt-oss-120b`. The app does not support another provider or silently fall back to one. It limits concurrent requests locally, respects Groq's returned rate-limit headers and `Retry-After`, retries at most twice when the requested wait is 30 seconds or less, and otherwise returns a retryable `429`. `GROQ_MAX_INPUT_CHARACTERS` bounds the combined normalized transcript and supplied context before a request is sent.
 
 `DATABASE_PATH` is the generated local SQLite file and must point to persistent writable storage in a deployed demo. `PROJECT_CONTEXT_MAX_CHARACTERS` is reserved for the deterministic selected-context ceiling and must be smaller than `GROQ_MAX_INPUT_CHARACTERS`. `PROJECT_CONTEXT_SEED_PATH` identifies the reviewed manifest consumed only by the deliberate seed command; application startup does not read or seed it.
+
+`PROJECT_REPOSITORY_ROOTS` is a server-side, path-delimiter-separated allowlist (`:` on macOS/Linux) of parent directories that may contain configured repositories. Enabling it also requires a server-side `PROJECT_CONTEXT_ADMIN_TOKEN` of at least 16 characters; enter that token in the local dashboard to authorize configuration, scan, ingestion-detail, and ingestion-approval requests. It is never returned by the server or stored by the browser. A dashboard-supplied path outside the configured real paths is rejected. Scans accept 1–20 explicitly listed `.md`, `.mdx`, `.rst`, or `.txt` files by default; traversal, symbolic files, secret-like filenames, ignored build/dependency directories, oversized files, and files outside the repository are rejected. The scanner records at most the configured excerpt and tracked-path bounds. It does not recurse through file contents, send code to Groq, or perform network access.
 
 This project uses Node's built-in SQLite API and therefore requires Node.js 22.13 or newer, when SQLite became available without an opt-in flag. The currently tested Node release may emit an experimental-feature warning when loading SQLite; no third-party database package or native build step is required.
 
@@ -151,6 +160,17 @@ The project inventory endpoint returns source labels and revisions without docum
 
 An explicit analysis request may provide the preview ID and the same optional ad hoc notes that were used to rank it. Before Groq is called, the backend verifies the snapshot hash, meeting ownership, project availability, notes hash, and single-use state. It then links the snapshot to the manual analysis job and sends the normalized transcript, user notes, and retrieved context as separately labeled fields under the existing total Groq input limit. The client cannot submit context documents or source IDs directly. The browser provides project selection, an exact source preview with omissions and character usage, preview invalidation when project or notes change, and a separate confirmation before analysis.
 
+### Ingest an approved local repository
+
+1. Put the repository under one of the server-side `PROJECT_REPOSITORY_ROOTS`.
+2. In **Approved local project context**, enter a project slug, name, description, absolute repository path, and explicit relative documentation paths such as `README.md` and `docs/architecture.md`.
+3. Create the project configuration, select it, and click **Scan project context**.
+4. Review every collected excerpt, path, line range, Git commit (when available), tracked-file metadata, and fingerprint.
+5. Click **Approve collected context**. Pending scans are never selected for analysis.
+6. For a completed meeting, create and then approve its bounded context snapshot before the separate Groq confirmation.
+
+If an approved file, tracked-file list, or Git commit changes, context preview and analysis are blocked until a new scan is reviewed and approved. Prior ingestions and immutable meeting snapshots remain stored for traceability. Local absolute paths are used only by the backend scanner and are never included in the Groq input.
+
 Open `http://localhost:3000`. Recall must send webhooks to a stable public route:
 
 ```text
@@ -165,6 +185,8 @@ https://<public-domain>/callbacks/calendar
 
 Set the Recall dashboard webhook subscriptions for the bot lifecycle, recording, and transcript events listed above. Localhost cannot receive Recall webhooks directly; use a stable HTTPS tunnel or deployed backend.
 
+The server binds to `127.0.0.1` by default. Set `HOST=0.0.0.0` only in a deployment with an authenticated/restricted ingress; a local ngrok tunnel can forward the default localhost listener.
+
 ## Run mock/demo mode
 
 Set `MOCK_MODE=true` and keep `RECALL_REGION=us-west-2`. Recall credentials and a public callback URL are not required in this mode.
@@ -177,9 +199,9 @@ The dashboard displays a visible `MOCK MODE` badge and a fixture architecture re
 
 ## Manual Groq analysis
 
-Once a meeting has a completed transcript, its card displays an optional seeded-project selector, project-notes field, and analysis controls. With a project selected, the user must first create and review a deterministic context preview. Changing either the project or notes invalidates that preview. The browser asks for confirmation before sending the normalized transcript, participant names, meeting metadata, notes, and displayed immutable context snapshot to Groq. With no project selected, the existing notes-only path remains available. Recording media, Recall credentials, webhook secrets, omitted sources, and unrelated meetings are not included.
+Once a meeting has a completed transcript, its card displays an optional seeded-or-locally-ingested project selector, project-notes field, and analysis controls. With a project selected, the user must create, review, and approve a deterministic context preview. Changing either the project or notes invalidates that approval. The browser then asks for a separate confirmation before sending the normalized transcript, participant names, meeting metadata, notes, and approved immutable context snapshot to Groq. With no project selected, the existing notes-only path remains available. Local repository paths, recording media, Recall credentials, webhook secrets, omitted sources, and unrelated meetings are not included.
 
-The structured response may contain architecture decisions, action items, bug reports, risks, and open questions. The backend rejects unknown fields, invalid types, unsupported participant assignments, unknown evidence IDs, unknown or duplicated context-source IDs, duplicate artifacts, vague required content, and more than 30 artifacts. Evidence text, speakers, and timestamps are hydrated from the locally stored normalized transcript rather than trusted from model output. Context provenance contains only selected source IDs, labels, kinds, revisions, and the immutable selection hash; it remains separate from transcript evidence. Artifacts without transcript evidence are visibly flagged.
+The structured response may contain architecture decisions, detailed ticket-like action items, bug reports, risks, and open questions. Ticket proposals support summary, problem, rationale, proposed implementation areas, acceptance criteria, dependencies, risks, open questions, priority, evidence IDs, and validated repository references. The backend rejects unknown fields, invalid types, unsupported participant assignments, unknown evidence IDs, unknown or duplicated context-source IDs, invented repository paths or line ranges, unsupported claims with no evidence/context reference, duplicate artifacts, vague required content, and more than 30 artifacts. Evidence text, speakers, and timestamps are hydrated from the locally stored normalized transcript rather than trusted from model output. Context provenance contains only approved selected sources, file paths, line ranges, ingestion IDs, revisions, and the immutable selection hash; it remains separate from transcript evidence.
 
 Implementation behavior follows Groq's official [Chat Completions API](https://console.groq.com/docs/api-reference), [strict structured outputs](https://console.groq.com/docs/structured-outputs), and [rate-limit headers](https://console.groq.com/docs/rate-limits).
 
@@ -202,11 +224,16 @@ The backend rejects empty or duplicate selections, artifacts outside the meeting
 ## Application API
 
 - `POST /api/demo/reset` is available only in mock mode, accepts no fields, and deterministically restores only the labeled fixture without external calls.
+- `POST /api/projects/local` creates a project whose repository path is constrained by `PROJECT_REPOSITORY_ROOTS`.
+- `POST /api/projects/:id/repositories/:repositoryId/scan` stages bounded approved-file excerpts and repository metadata for review.
+- `GET /api/projects/:id/ingestions/:ingestionId` returns one staged or historical ingestion with its exact excerpts.
+- `POST /api/projects/:id/ingestions/:ingestionId/approve` activates one pending ingestion and supersedes the prior approved ingestion without deleting it.
+- `POST /api/meetings/:id/context-preview/:selectionId/approve` approves the exact immutable context snapshot required for selected-project analysis.
 - `POST /api/meetings` creates and persists a meeting, then creates a Recall bot.
 - `GET /api/meetings` lists locally stored meetings.
 - `GET /api/meetings/:id` returns one meeting and its lifecycle state.
 - `GET /api/meetings/:id/transcript` returns its normalized transcript and analytics.
-- `GET /api/projects` lists active seeded projects without contacting an external system.
+- `GET /api/projects` lists active seeded and locally configured projects without contacting an external system.
 - `GET /api/projects/:id/context` returns source labels, kinds, revisions, and active state without exposing document contents.
 - `POST /api/meetings/:id/context-preview` accepts `{ "projectId": "...", "projectContext": "..." }`, requires a completed transcript, and persists a deterministic bounded preview without invoking Groq.
 - `POST /api/meetings/:id/analyze` is the only path that invokes Groq; after transcript completion it accepts optional `{ "contextSelectionId": "...", "projectContext": "..." }`. A supplied selection must belong to this meeting, pass its integrity check, remain unused, reference an active project, and match the notes hash created during preview.
@@ -252,7 +279,7 @@ The Recall workspace, region, purpose-named API key metadata, webhook destinatio
 - Calendar OAuth is not connected.
 - Long transcripts are rejected at the configured character bound; transcript chunking and cross-chunk deduplication are not implemented yet.
 - Rate-limit and concurrency state is process-local, so a multi-instance deployment needs a shared limiter.
-- Live repository, documentation, and ticket connectors remain intentionally out of scope; project context comes only from the deliberately seeded local corpus.
+- Live repository, documentation, and ticket connectors remain intentionally out of scope; project context comes only from the deliberately seeded corpus or explicitly scanned and approved local documentation.
 - Review events identify the actor only as `local_user` because authentication and multi-user identity are outside this demo's scope.
 - Linear and Jira drafts require a separate importer to resolve workspace-specific IDs and validate configured create-screen fields before submission.
 - Direct Jira/Linear API submission is intentionally excluded; no external ticket API calls are made.

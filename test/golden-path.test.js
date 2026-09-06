@@ -61,6 +61,8 @@ test('golden path captures, normalizes, explicitly analyzes, approves, and expor
       type: 'action_item', title: 'Document the migration plan', status: 'proposed', description: 'Document the migration plan and include its rollback checks.', context: null, decision: null,
       alternativesRejected: [], consequences: [], assignee: 'Ada', dueDate: null, acceptanceCriteria: ['The migration and rollback checks are documented.'], priority: 'medium',
       stepsToReproduce: [], expectedBehavior: null, actualBehavior: null, severity: null, impact: null, mitigation: null, owner: null, question: null, suggestedOwner: null,
+      summary: 'Document the migration and rollback checks.', problem: 'The migration plan is not recorded.', whyItMatters: 'The team needs a reviewable rollout path.', proposedImplementationAreas: ['Migration documentation'], dependencies: [], risks: [], openQuestions: [],
+      repositoryReferences: [],
       evidenceUtteranceIds: ['utterance-1', 'utterance-2'], contextSourceIds: [], confidence: 'high',
     }] } };
   } };

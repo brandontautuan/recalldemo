@@ -19,14 +19,14 @@ const temporaryDirectory = (context) => {
 test('creates the project-context schema and reapplies migrations idempotently', (context) => {
   const databasePath = path.join(temporaryDirectory(context), 'context.sqlite');
   const store = new ProjectContextStore(databasePath);
-  assert.deepEqual(store.migrate(), [1, 2]);
-  assert.equal(store.schemaVersion(), 2);
+  assert.deepEqual(store.migrate(), [1, 2, 3, 4]);
+  assert.equal(store.schemaVersion(), 4);
   assert.deepEqual(store.migrate(), []);
   store.close();
 
   const database = new DatabaseSync(databasePath);
   const tables = database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").all().map((row) => row.name);
-  for (const table of ['context_documents', 'context_selections', 'meeting_project_context', 'projects', 'repositories', 'schema_migrations', 'work_items']) {
+  for (const table of ['analysis_runs', 'context_documents', 'context_ingestions', 'context_selections', 'meeting_project_context', 'projects', 'repositories', 'schema_migrations', 'work_items']) {
     assert.ok(tables.includes(table), `missing table ${table}`);
   }
   const indexes = database.prepare("SELECT name FROM sqlite_schema WHERE type = 'index'").all().map((row) => row.name);
@@ -39,9 +39,9 @@ test('enforces foreign keys, document kinds, JSON, hashes, and priorities', (con
   const store = new ProjectContextStore(path.join(temporaryDirectory(context), 'context.sqlite'));
   store.migrate();
   const database = store.database;
-  assert.throws(() => database.prepare("INSERT INTO repositories VALUES ('repo', 'missing', 'Repo', 'https://example.test/repo', 'main', '{}', 'now', 'now')").run(), /FOREIGN KEY/);
+  assert.throws(() => database.prepare("INSERT INTO repositories (id, project_id, name, remote_url, default_branch, metadata_json, created_at, updated_at) VALUES ('repo', 'missing', 'Repo', 'https://example.test/repo', 'main', '{}', 'now', 'now')").run(), /FOREIGN KEY/);
   database.prepare("INSERT INTO projects (id, slug, name, description, terminology_json, ticket_format_json, created_at, updated_at) VALUES ('project', 'project', 'Project', 'Description', '{}', '{}', 'now', 'now')").run();
-  assert.throws(() => database.prepare("INSERT INTO context_documents VALUES ('doc', 'project', NULL, 'unknown', 'Doc', 'README.md', 'Text', ?, 1, 0, 1, 'now', 'now')").run('a'.repeat(64)), /CHECK constraint/);
+  assert.throws(() => database.prepare("INSERT INTO context_documents (id, project_id, repository_id, kind, title, source_path, content, content_sha256, revision, selection_priority, is_active, created_at, updated_at) VALUES ('doc', 'project', NULL, 'unknown', 'Doc', 'README.md', 'Text', ?, 1, 0, 1, 'now', 'now')").run('a'.repeat(64)), /CHECK constraint/);
   assert.throws(() => database.prepare("INSERT INTO work_items VALUES ('work', 'project', 'ENG-1', 'Title', 'Description', 'open', NULL, -1, '[]', NULL, 'now')").run(), /CHECK constraint/);
   assert.throws(() => database.prepare("INSERT INTO work_items VALUES ('work', 'project', 'ENG-1', 'Title', 'Description', 'open', NULL, 0, 'not-json', NULL, 'now')").run(), /CHECK constraint/);
   store.close();

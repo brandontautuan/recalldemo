@@ -39,11 +39,32 @@ export const artifactResponseSchema = {
           owner: nullableString,
           question: nullableString,
           suggestedOwner: nullableString,
+          summary: nullableString,
+          problem: nullableString,
+          whyItMatters: nullableString,
+          proposedImplementationAreas: stringArray,
+          dependencies: stringArray,
+          risks: stringArray,
+          openQuestions: stringArray,
+          repositoryReferences: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                sourceId: { type: 'string' },
+                path: { type: 'string' },
+                lineStart: { type: ['integer', 'null'] },
+                lineEnd: { type: ['integer', 'null'] },
+              },
+              required: ['sourceId', 'path', 'lineStart', 'lineEnd'],
+            },
+          },
           evidenceUtteranceIds: stringArray,
           contextSourceIds: stringArray,
           confidence: { type: 'string', enum: confidenceValues },
         },
-        required: ['type', 'title', 'status', 'description', 'context', 'decision', 'alternativesRejected', 'consequences', 'assignee', 'dueDate', 'acceptanceCriteria', 'priority', 'stepsToReproduce', 'expectedBehavior', 'actualBehavior', 'severity', 'impact', 'mitigation', 'owner', 'question', 'suggestedOwner', 'evidenceUtteranceIds', 'contextSourceIds', 'confidence'],
+        required: ['type', 'title', 'status', 'description', 'context', 'decision', 'alternativesRejected', 'consequences', 'assignee', 'dueDate', 'acceptanceCriteria', 'priority', 'stepsToReproduce', 'expectedBehavior', 'actualBehavior', 'severity', 'impact', 'mitigation', 'owner', 'question', 'suggestedOwner', 'summary', 'problem', 'whyItMatters', 'proposedImplementationAreas', 'dependencies', 'risks', 'openQuestions', 'repositoryReferences', 'evidenceUtteranceIds', 'contextSourceIds', 'confidence'],
       },
     },
   },
@@ -62,7 +83,7 @@ const isNullableString = (value) => value === null || typeof value === 'string';
 const isStringArray = (value) => Array.isArray(value) && value.every((item) => typeof item === 'string');
 const normalizedTitle = (value) => value.trim().toLocaleLowerCase();
 const artifactFields = new Set(Object.keys(artifactResponseSchema.properties.artifacts.items.properties));
-const immutableArtifactFields = new Set(['type', 'status', 'evidenceUtteranceIds', 'contextSourceIds', 'confidence']);
+const immutableArtifactFields = new Set(['type', 'status', 'repositoryReferences', 'evidenceUtteranceIds', 'contextSourceIds', 'confidence']);
 const editableContentFields = new Set([...artifactFields].filter((field) => !immutableArtifactFields.has(field) && field !== 'title'));
 
 export function validateAndHydrateArtifacts(payload, { meetingId, participants, utterances, contextSelection = null }) {
@@ -97,16 +118,31 @@ export function validateAndHydrateArtifacts(payload, { meetingId, participants, 
         referencedSources.add(id);
       }
     }
+    if (!Array.isArray(artifact.repositoryReferences)) issues.push(`${label}.repositoryReferences must be an array`);
+    else for (const [referenceIndex, reference] of artifact.repositoryReferences.entries()) {
+      const referenceLabel = `${label}.repositoryReferences[${referenceIndex}]`;
+      if (!reference || typeof reference !== 'object' || Array.isArray(reference)) { issues.push(`${referenceLabel} must be an object`); continue; }
+      if (Object.keys(reference).some((field) => !['sourceId', 'path', 'lineStart', 'lineEnd'].includes(field))) issues.push(`${referenceLabel} contains unsupported fields`);
+      if (typeof reference.sourceId !== 'string' || typeof reference.path !== 'string' || !reference.path) { issues.push(`${referenceLabel} requires sourceId and path`); continue; }
+      const source = contextSourceById.get(reference.sourceId);
+      if (!source) { issues.push(`${referenceLabel} references unapproved context`); continue; }
+      if (!artifact.contextSourceIds?.includes(reference.sourceId)) issues.push(`${referenceLabel}.sourceId must also appear in contextSourceIds`);
+      if (source.sourcePath !== reference.path && !source.trackedFiles?.includes(reference.path)) issues.push(`${referenceLabel}.path is not present in its approved context source`);
+      if (reference.lineStart !== null && (!Number.isInteger(reference.lineStart) || reference.lineStart < 1)) issues.push(`${referenceLabel}.lineStart is invalid`);
+      if (reference.lineEnd !== null && (!Number.isInteger(reference.lineEnd) || reference.lineEnd < (reference.lineStart ?? 1))) issues.push(`${referenceLabel}.lineEnd is invalid`);
+      if ((reference.lineStart === null) !== (reference.lineEnd === null)) issues.push(`${referenceLabel} line range must be complete or null`);
+      if (source.sourcePath && (reference.lineStart !== source.lineStart || reference.lineEnd !== source.lineEnd)) issues.push(`${referenceLabel} line range must match the approved excerpt`);
+    }
     if (artifact.assignee !== null && !participantNames.has(artifact.assignee)) issues.push(`${label}.assignee is not a meeting participant`);
     if (artifact.owner !== null && !participantNames.has(artifact.owner)) issues.push(`${label}.owner is not a meeting participant`);
     if (artifact.suggestedOwner !== null && !participantNames.has(artifact.suggestedOwner)) issues.push(`${label}.suggestedOwner is not a meeting participant`);
     if (!priorityValues.includes(artifact.priority)) issues.push(`${label}.priority is invalid`);
     if (!priorityValues.includes(artifact.severity)) issues.push(`${label}.severity is invalid`);
     if (!priorityValues.includes(artifact.impact)) issues.push(`${label}.impact is invalid`);
-    for (const field of ['description', 'context', 'decision', 'assignee', 'dueDate', 'expectedBehavior', 'actualBehavior', 'mitigation', 'owner', 'question', 'suggestedOwner']) {
+    for (const field of ['description', 'context', 'decision', 'assignee', 'dueDate', 'expectedBehavior', 'actualBehavior', 'mitigation', 'owner', 'question', 'suggestedOwner', 'summary', 'problem', 'whyItMatters']) {
       if (!isNullableString(artifact[field])) issues.push(`${label}.${field} must be a string or null`);
     }
-    for (const field of ['consequences', 'acceptanceCriteria', 'stepsToReproduce']) if (!isStringArray(artifact[field])) issues.push(`${label}.${field} must be a string array`);
+    for (const field of ['consequences', 'acceptanceCriteria', 'stepsToReproduce', 'proposedImplementationAreas', 'dependencies', 'risks', 'openQuestions']) if (!isStringArray(artifact[field])) issues.push(`${label}.${field} must be a string array`);
     if (!Array.isArray(artifact.alternativesRejected) || !artifact.alternativesRejected.every((item) => typeof item?.alternative === 'string' && typeof item?.reason === 'string')) issues.push(`${label}.alternativesRejected is invalid`);
     if (artifact.type === 'architecture_decision' && (!artifact.decision || artifact.decision.trim().length < 4)) issues.push(`${label} architecture decision must state the decision`);
     if (artifact.type === 'action_item' && (!artifact.description || artifact.description.trim().length < 10)) issues.push(`${label} action item is overly vague`);
@@ -114,6 +150,7 @@ export function validateAndHydrateArtifacts(payload, { meetingId, participants, 
     if (artifact.type === 'bug_report' && Array.isArray(artifact.stepsToReproduce) && artifact.stepsToReproduce.length && (!Array.isArray(artifact.evidenceUtteranceIds) || !artifact.evidenceUtteranceIds.length)) issues.push(`${label} has unsupported reproduction steps`);
     if (artifact.type === 'risk' && (!artifact.description || !artifact.impact)) issues.push(`${label} risk must include a description and impact`);
     if (artifact.type === 'open_question' && (!artifact.question || artifact.question.trim().length < 4)) issues.push(`${label} open question must state the question`);
+    if (Array.isArray(artifact.evidenceUtteranceIds) && Array.isArray(artifact.contextSourceIds) && !artifact.evidenceUtteranceIds.length && !artifact.contextSourceIds.length) issues.push(`${label} must reference transcript evidence or approved project context`);
     const duplicateKey = typeof artifact.title === 'string' ? `${artifact.type}:${normalizedTitle(artifact.title)}` : label;
     if (duplicates.has(duplicateKey)) issues.push(`${label} duplicates another artifact`);
     duplicates.add(duplicateKey);
@@ -134,7 +171,7 @@ export function validateAndHydrateArtifacts(payload, { meetingId, participants, 
     });
     const contextSources = artifact.contextSourceIds.map((sourceId) => {
       const source = contextSourceById.get(sourceId);
-      return { sourceId, kind: source.kind, label: source.label, revision: source.revision };
+      return { sourceId, kind: source.kind, label: source.label, revision: source.revision, sourcePath: source.sourcePath ?? null, lineStart: source.lineStart ?? null, lineEnd: source.lineEnd ?? null, ingestionId: source.ingestionId ?? null, truncated: Boolean(source.truncated), trackedFiles: source.trackedFiles ?? [] };
     });
     const { type, title, status, confidence, evidenceUtteranceIds, contextSourceIds, ...content } = artifact;
     return {
@@ -176,6 +213,14 @@ export function validateArtifactRevision(artifact, revision, context) {
     type: artifact.type,
     title: revision.title ?? artifact.title,
     status: 'proposed',
+    summary: null,
+    problem: null,
+    whyItMatters: null,
+    proposedImplementationAreas: [],
+    dependencies: [],
+    risks: [],
+    openQuestions: [],
+    repositoryReferences: [],
     ...artifact.content,
     ...(revision.content ?? {}),
     evidenceUtteranceIds: (artifact.evidence ?? []).map((item) => item.utteranceId),

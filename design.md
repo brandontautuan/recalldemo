@@ -515,12 +515,18 @@ projects
   created_at, updated_at
 
 repositories
-  id, project_id, name, remote_url, default_branch, metadata_json,
+  id, project_id, name, remote_url, default_branch, metadata_json, local_path nullable,
+  approved_files_json,
   created_at, updated_at
 
 context_documents
   id, project_id, repository_id nullable, kind, title, source_path,
-  content, content_sha256, revision, is_active, created_at, updated_at
+  content, content_sha256, revision, is_active, ingestion_id nullable,
+  line_start nullable, line_end nullable, approved_at nullable, created_at, updated_at
+
+context_ingestions
+  id, project_id, repository_id, status, commit_version nullable,
+  source_fingerprint, tracked_files_json, created_at, approved_at nullable
 
 work_items
   id, project_id, external_key nullable, title, description, status,
@@ -531,7 +537,11 @@ meeting_project_context
 
 context_selections
   id, meeting_id, analysis_id nullable, project_id, selection_json, content_sha256,
-  character_count, created_at
+  character_count, created_at, approved_at nullable
+
+analysis_runs
+  id, meeting_id, project_id nullable, context_selection_id nullable,
+  status, provider, model nullable, error_code nullable, created_at, completed_at nullable
 ```
 
 `kind` is a closed set for this scope: `project_metadata`, `readme_excerpt`, `repository_metadata`, and `work_item_snapshot`. `content_sha256` and the persisted selection snapshot make it possible to show exactly which non-transcript context informed a proposal after a seed changes. A preview selection is created without an `analysis_id` and linked to the resulting analysis only after the user confirms it. Context is supporting background, never transcript evidence; artifact evidence links must still resolve only to normalized transcript utterances.
@@ -539,6 +549,8 @@ context_selections
 ### Deterministic ingestion and retrieval
 
 A versioned local seed manifest supplies project metadata, repository records, bounded README/document excerpts, and existing-ticket snapshots. A one-shot backend/CLI ingestion command validates the manifest, normalizes whitespace and identifiers, upserts by stable IDs, records content hashes and revisions, and rejects unsupported document kinds or oversized entries. It performs no LLM call, network fetch, or background work.
+
+A local repository configuration is a backend ingestion source, never an LLM tool or prompt value. The browser may configure a path only when its resolved location is inside a server-configured `PROJECT_REPOSITORY_ROOTS` allowlist. Enabling those roots requires a separate server-side project-context admin token, supplied explicitly for configuration and ingestion operations and never returned to browser code. A scan reads only explicit relative approved-document paths, rejects traversal, symlinks, secret-like names, denied dependency/build directories, unsupported extensions, and size-limit violations, and stages bounded excerpts as inactive documents. Git commit and bounded tracked-file paths are metadata only. The user must review and approve the staged ingestion before its documents become selectable. A changed commit, working-tree state, tracked-file set, or approved excerpt changes the deterministic fingerprint and blocks preview/analysis until a new ingestion is approved. Older ingestions and immutable selections are retained.
 
 The user explicitly selects a project when launching a meeting or before analysis. The backend persists that association and, on an explicit context-preview request that makes no LLM call, constructs a context snapshot in this fixed order:
 
@@ -548,6 +560,8 @@ The user explicitly selects a project when launching a meeting or before analysi
 4. Open work items, ordered by deterministic lexical overlap with normalized meeting title, optional user context, and transcript terms; then by manifest priority, `updated_at`, and stable ID. If there is no overlap, include no work items rather than guessing relevance.
 
 The selector uses only deterministic token normalization and ordering; it is not a classifier, embedding search, agent, or LLM. It returns source IDs, labels, revisions, and text under a separate context character budget. If the resulting context does not fit, lower-priority items are omitted and the response records the omission. The analysis request accepts the immutable preview selection ID plus the user's optional ad hoc context, while the existing total Groq input limit remains the final bound. The UI must disclose the selected project/context sources before the existing confirmation dialog and display them separately from transcript evidence.
+
+Detailed ticket proposals may include summary, problem/requested change, rationale, proposed implementation areas, acceptance criteria, dependencies, risks, open questions, suggested priority, and a suggested owner only when supported by a participant statement. Repository references are structured as an approved context source ID plus an exact tracked or approved-document path and, for excerpts, the stored line range. Validation rejects paths, ranges, owners, or source IDs absent from the approved snapshot. Unsupported fields remain `null` or empty rather than being inferred.
 
 ### MCP decision
 
@@ -1110,7 +1124,16 @@ The test must assert that Groq is not called by meeting creation or either webho
 * Verify retryable errors, disclosure wording, privacy wording, fixture labels, and absence of automatic external actions.
 * Keep Calendar OAuth and production-scale infrastructure deferred.
 
-Phases 10–12 and the Phase 13 engineering polish are implemented. Phase 13 now stops at the live-verification boundary: a user must join and consent in a disposable meeting, explicitly confirm the one live Groq request, and judge the rendered browser flow. Phase 8 remains deferred.
+### Phase 14: Controlled Local Repository Context — Implemented
+
+* Extend SQLite with repository paths, approved file lists, context ingestions, line ranges, snapshot approvals, and durable analysis-run records.
+* Add server-side repository-root allowlisting and deterministic scanning of only explicit approved documentation files.
+* Stage scans for human review, activate them only after approval, fingerprint repository state, retain superseded ingestions, and block stale context.
+* Add dashboard project creation, scan review, ingestion approval, project selection, context-preview approval, and separate Groq confirmation.
+* Extend ticket proposals with supported summaries, problems, rationale, implementation areas, dependencies, risks, questions, and repository-context references.
+* Test traversal, symlink escape, secret-like names, bounds, Git-ignored paths, reproducibility, activation, staleness, snapshot approval, and analysis provenance.
+
+Phases 10–12, Phase 13 engineering polish, and Phase 14 controlled local repository context are implemented. Phase 13 still stops at the live-verification boundary: a user must join and consent in a disposable meeting, explicitly confirm the one live Groq request, and judge the rendered browser flow. Phase 8 remains deferred.
 
 | Remaining phase | Depends on | Direct user attention |
 | --- | --- | --- |
@@ -1118,6 +1141,7 @@ Phases 10–12 and the Phase 13 engineering polish are implemented. Phase 13 now
 | Phase 11: Demo reset — implemented | Existing fixture IDs and local store | None. |
 | Phase 12: Golden-path test — implemented | Phases 10–11 and mocked Recall/Groq boundaries | None; run `npm run test:golden`. |
 | Phase 13: Engineering polish implemented; live acceptance pending | Phases 10–12 | Required for one disposable live meeting, visible recording consent, explicit Groq confirmation, and final UI judgment. |
+| Phase 14: Controlled local repository context — implemented | Existing SQLite selection pipeline | Configure at least one allowed repository root and review the first scan. |
 
 ## 20. Definition of Done
 
@@ -1131,7 +1155,7 @@ The project is complete when:
 * Speaker and timestamp information are preserved.
 * Talk-time metrics are calculated deterministically.
 * The user can explicitly start the bounded Groq pipeline, which generates engineering artifact proposals using defined schemas and only transcript evidence plus supplied project context.
-* Where enabled, selected seeded project context is ingested deterministically, retrieved as a persisted bounded snapshot, disclosed before the Groq request, and distinguishable from transcript evidence.
+* Where enabled, selected seeded or explicitly scanned local project context is ingested deterministically, retrieved as an approved persisted bounded snapshot, disclosed before the Groq request, and distinguishable from transcript evidence.
 * Generated artifacts link to transcript evidence and distinguish any supplied or retrieved project context.
 * Users can review, edit, approve, or reject artifacts.
 * Approved action items can be exported as JSON.

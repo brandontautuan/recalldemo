@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 const liveRequired = ['RECALL_API_KEY', 'RECALL_WEBHOOK_VERIFICATION_SECRET', 'PUBLIC_API_BASE_URL'];
 const strictGroqModels = new Set(['openai/gpt-oss-20b', 'openai/gpt-oss-120b']);
 
@@ -18,6 +20,11 @@ export function createConfig(env = process.env) {
   const groqMaximumConcurrency = Number(env.GROQ_MAX_CONCURRENCY || 1);
   const groqMaximumInputCharacters = Number(env.GROQ_MAX_INPUT_CHARACTERS || 18_000);
   const projectContextMaximumCharacters = Number(env.PROJECT_CONTEXT_MAX_CHARACTERS || 12_000);
+  const projectRepositoryRoots = (env.PROJECT_REPOSITORY_ROOTS || '').split(path.delimiter).map((root) => root.trim()).filter(Boolean).map((root) => path.resolve(root));
+  const projectContextAdminToken = env.PROJECT_CONTEXT_ADMIN_TOKEN || null;
+  const projectScanMaximumFiles = Number(env.PROJECT_SCAN_MAX_FILES || 20);
+  const projectScanMaximumFileBytes = Number(env.PROJECT_SCAN_MAX_FILE_BYTES || 100_000);
+  const projectScanMaximumFileCharacters = Number(env.PROJECT_SCAN_MAX_FILE_CHARACTERS || 6_000);
   if (!Number.isInteger(groqMaximumConcurrency) || groqMaximumConcurrency < 1 || groqMaximumConcurrency > 4) throw new Error('GROQ_MAX_CONCURRENCY must be an integer from 1 to 4.');
   if (!Number.isInteger(groqMaximumInputCharacters) || groqMaximumInputCharacters < 1_000) throw new Error('GROQ_MAX_INPUT_CHARACTERS must be an integer of at least 1000.');
   if (!Number.isInteger(projectContextMaximumCharacters) || projectContextMaximumCharacters < 1_000 || projectContextMaximumCharacters > 100_000) {
@@ -26,6 +33,10 @@ export function createConfig(env = process.env) {
   if (projectContextMaximumCharacters >= groqMaximumInputCharacters) {
     throw new Error('PROJECT_CONTEXT_MAX_CHARACTERS must be smaller than GROQ_MAX_INPUT_CHARACTERS.');
   }
+  if (!Number.isInteger(projectScanMaximumFiles) || projectScanMaximumFiles < 1 || projectScanMaximumFiles > 50) throw new Error('PROJECT_SCAN_MAX_FILES must be an integer from 1 to 50.');
+  if (!Number.isInteger(projectScanMaximumFileBytes) || projectScanMaximumFileBytes < 1_000 || projectScanMaximumFileBytes > 1_000_000) throw new Error('PROJECT_SCAN_MAX_FILE_BYTES must be an integer from 1000 to 1000000.');
+  if (!Number.isInteger(projectScanMaximumFileCharacters) || projectScanMaximumFileCharacters < 500 || projectScanMaximumFileCharacters > 20_000) throw new Error('PROJECT_SCAN_MAX_FILE_CHARACTERS must be an integer from 500 to 20000.');
+  if (projectRepositoryRoots.length && (!projectContextAdminToken || projectContextAdminToken.length < 16)) throw new Error('PROJECT_CONTEXT_ADMIN_TOKEN must contain at least 16 characters when PROJECT_REPOSITORY_ROOTS is configured.');
   return Object.freeze({
     mockMode,
     region: env.RECALL_REGION,
@@ -40,5 +51,10 @@ export function createConfig(env = process.env) {
     databasePath: env.DATABASE_PATH || 'data/project-context.sqlite',
     projectContextSeedPath: env.PROJECT_CONTEXT_SEED_PATH || 'seeds/project-context.example.json',
     projectContextMaximumCharacters,
+    projectRepositoryRoots,
+    projectContextAdminToken,
+    projectScanMaximumFiles,
+    projectScanMaximumFileBytes,
+    projectScanMaximumFileCharacters,
   });
 }

@@ -31,4 +31,5 @@ if (smoke) {
   console.log('Production app constructed and its GET / handler returned 200.');
   process.exit(0);
 }
-http.createServer(app).listen(process.env.PORT || 3000, () => console.log(`Recall Meeting Bot listening on ${process.env.PORT || 3000}`));
+const host = process.env.HOST || '127.0.0.1';
+http.createServer(app).listen(process.env.PORT || 3000, host, () => console.log(`Recall Meeting Bot listening on http://${host}:${process.env.PORT || 3000}`));

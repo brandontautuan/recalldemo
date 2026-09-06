@@ -10,6 +10,7 @@ import { createArtifactExport, ExportValidationError, ExportVersionConflictError
 import { buildContextSelection, projectContextHash } from './context-selector.js';
 import { ContextSelectionIntegrityError } from './context-db.js';
 import { mockFixture } from './mock-data.js';
+import { RepositoryContextError, resolveApprovedRepositoryPath, scanApprovedRepository } from './repository-context.js';
 
 const publicDir = path.resolve('public');
 const titleOf = (event) => event.raw?.summary ?? event.raw?.title ?? event.title ?? '';
@@ -35,6 +36,13 @@ const validMeetingUrl = (value) => {
 };
 
 export function createApp({ config, recall, store, analysis, contextStore = null, logger = console }) {
+  const projectAdminAuthorized = (req) => {
+    const supplied = req.headers['x-project-context-admin-token'];
+    if (!config.projectContextAdminToken || typeof supplied !== 'string') return false;
+    const expected = Buffer.from(config.projectContextAdminToken);
+    const actual = Buffer.from(supplied);
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  };
   const meetingForBot = (botId) => botId ? store.findMeetingByBotId(botId) : null;
   const setMeetingState = (meeting, state, details = {}) => typeof store.setMeetingState === 'function'
     ? store.setMeetingState(meeting.id, state, details)
@@ -43,6 +51,27 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       processingStatus: state === 'failed' ? 'failed' : meeting.processingStatus,
       error: state === 'failed' ? { code: details.code, subCode: details.subCode ?? null, message: details.message ?? null } : null,
     });
+  const localContextError = (bundle) => {
+    if (!contextStore || !bundle) return null;
+    if (contextStore.localRepositoriesRequireApproval(bundle.project.id)) return 'Scan and approve the configured local repository context before using project context.';
+    try {
+      for (const repository of bundle.repositories.filter((item) => item.localPath)) {
+        const current = scanApprovedRepository({
+          repositoryPath: repository.localPath,
+          approvedFiles: repository.approvedFiles,
+          allowedRoots: config.projectRepositoryRoots,
+          maximumFiles: config.projectScanMaximumFiles,
+          maximumFileBytes: config.projectScanMaximumFileBytes,
+          maximumFileCharacters: config.projectScanMaximumFileCharacters,
+        });
+        if (contextStore.approvedContextIngestion(repository.id)?.sourceFingerprint !== current.sourceFingerprint) return 'The local repository changed after approval. Scan and approve a new ingestion before analysis.';
+      }
+      return null;
+    } catch (error) {
+      if (error instanceof RepositoryContextError) return `Local repository context is unavailable: ${error.message}`;
+      throw error;
+    }
+  };
 
   const requestTranscript = async (recordingId, meeting) => {
     const claimKey = `transcript:${recordingId}`;
@@ -193,6 +222,68 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
       return json(res, 200, { projects: contextStore.listProjects() });
     }
+    if (req.method === 'POST' && url.pathname === '/api/projects/local') {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      if (!projectAdminAuthorized(req)) return json(res, 401, { error: 'A valid project-context admin token is required.' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'Request body must be valid JSON.' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Request body must be a JSON object.' });
+      if (Object.keys(body).some((field) => !['slug', 'name', 'description', 'repositoryPath', 'approvedFiles'].includes(field))) return json(res, 400, { error: 'Request body contains unsupported fields.' });
+      if (typeof body.slug !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(body.slug) || body.slug.length > 100) return json(res, 400, { error: 'slug must contain lowercase words separated by hyphens.' });
+      if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 200) return json(res, 400, { error: 'name is required and must contain at most 200 characters.' });
+      if (typeof body.description !== 'string' || !body.description.trim() || body.description.length > 10_000) return json(res, 400, { error: 'description is required and must contain at most 10000 characters.' });
+      if (!Array.isArray(body.approvedFiles) || body.approvedFiles.some((file) => typeof file !== 'string')) return json(res, 400, { error: 'approvedFiles must be an array of relative paths.' });
+      try {
+        const repositoryPath = resolveApprovedRepositoryPath(body.repositoryPath, config.projectRepositoryRoots);
+        const project = contextStore.createLocalProject({ slug: body.slug, name: body.name.trim(), description: body.description.trim(), repositoryPath, approvedFiles: body.approvedFiles });
+        return json(res, 201, { project });
+      } catch (error) {
+        if (error instanceof RepositoryContextError) return json(res, 422, { error: error.message, code: error.code });
+        if (/UNIQUE constraint/.test(error.message)) return json(res, 409, { error: 'A project with this slug already exists.' });
+        throw error;
+      }
+    }
+    const repositoryScanMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/repositories\/([^/]+)\/scan$/);
+    if (req.method === 'POST' && repositoryScanMatch) {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      if (!projectAdminAuthorized(req)) return json(res, 401, { error: 'A valid project-context admin token is required.' });
+      const projectId = decodeURIComponent(repositoryScanMatch[1]);
+      const repositoryId = decodeURIComponent(repositoryScanMatch[2]);
+      const bundle = contextStore.getProjectBundle(projectId);
+      const repository = bundle?.repositories.find((item) => item.id === repositoryId);
+      if (!bundle || !repository) return json(res, 404, { error: 'Configured project repository not found.' });
+      if (!repository.localPath) return json(res, 409, { error: 'The repository has no configured local path.' });
+      try {
+        const scan = scanApprovedRepository({
+          repositoryPath: repository.localPath,
+          approvedFiles: repository.approvedFiles,
+          allowedRoots: config.projectRepositoryRoots,
+          maximumFiles: config.projectScanMaximumFiles,
+          maximumFileBytes: config.projectScanMaximumFileBytes,
+          maximumFileCharacters: config.projectScanMaximumFileCharacters,
+        });
+        return json(res, 201, { ingestion: contextStore.stageRepositoryIngestion({ projectId, repositoryId, scan }) });
+      } catch (error) {
+        if (error instanceof RepositoryContextError) return json(res, 422, { error: error.message, code: error.code });
+        throw error;
+      }
+    }
+    const ingestionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/ingestions\/([^/]+)$/);
+    if (req.method === 'GET' && ingestionMatch) {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      if (!projectAdminAuthorized(req)) return json(res, 401, { error: 'A valid project-context admin token is required.' });
+      const ingestion = contextStore.getContextIngestion(decodeURIComponent(ingestionMatch[2]));
+      if (!ingestion || ingestion.projectId !== decodeURIComponent(ingestionMatch[1])) return json(res, 404, { error: 'Context ingestion not found.' });
+      return json(res, 200, { ingestion });
+    }
+    const ingestionApproveMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/ingestions\/([^/]+)\/approve$/);
+    if (req.method === 'POST' && ingestionApproveMatch) {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      if (!projectAdminAuthorized(req)) return json(res, 401, { error: 'A valid project-context admin token is required.' });
+      const ingestion = contextStore.approveContextIngestion(decodeURIComponent(ingestionApproveMatch[2]), decodeURIComponent(ingestionApproveMatch[1]));
+      return ingestion ? json(res, 200, { ingestion }) : json(res, 409, { error: 'Only a pending ingestion for this project can be approved.' });
+    }
     const projectContextMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/context$/);
     if (req.method === 'GET' && projectContextMatch) {
       if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
@@ -283,10 +374,18 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       const bundle = contextStore.getProjectBundle(body.projectId.trim().toLowerCase());
       if (!bundle) return json(res, 404, { error: 'Project not found.' });
       if (!bundle.project.isActive) return json(res, 409, { error: 'Project is inactive.' });
+      const repositoryContextError = localContextError(bundle);
+      if (repositoryContextError) return json(res, 409, { error: repositoryContextError });
       const projectContext = body.projectContext?.trim() || null;
       const preview = buildContextSelection({ ...bundle, meeting, transcript, projectContext, maximumCharacters: config.projectContextMaximumCharacters });
       const saved = contextStore.saveContextSelection({ meetingId, projectId: bundle.project.id, ...preview });
       return json(res, 201, { contextSelection: saved });
+    }
+    const contextApproveMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/context-preview\/([^/]+)\/approve$/);
+    if (req.method === 'POST' && contextApproveMatch) {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      const approved = contextStore.approveContextSelection(decodeURIComponent(contextApproveMatch[2]), decodeURIComponent(contextApproveMatch[1]));
+      return approved ? json(res, 200, { contextSelection: approved }) : json(res, 409, { error: 'Only an unused preview for this meeting can be approved.' });
     }
     const exportMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/export$/);
     if (req.method === 'POST' && exportMatch) {
@@ -348,9 +447,13 @@ export function createApp({ config, recall, store, analysis, contextStore = null
         if (!contextSelection) return json(res, 404, { error: 'Context preview not found.' });
         if (contextSelection.meetingId !== meetingId) return json(res, 409, { error: 'Context preview belongs to another meeting.' });
         if (contextSelection.analysisId) return json(res, 409, { error: 'Context preview has already been used. Create a new preview.' });
+        if (!contextSelection.approvedAt) return json(res, 409, { error: 'Approve the displayed context snapshot before analysis.' });
         if (contextSelection.query.projectContextSha256 !== projectContextHash(projectContext)) return json(res, 409, { error: 'Project notes changed after the context preview. Create a new preview.' });
         const selectedProject = contextStore.getProject(contextSelection.projectId);
         if (!selectedProject || !selectedProject.isActive) return json(res, 409, { error: 'The selected project is no longer available.' });
+        if (!contextStore.contextSelectionUsesCurrentIngestions(contextSelection)) return json(res, 409, { error: 'The approved context snapshot references a superseded repository ingestion. Create and approve a new preview.' });
+        const repositoryContextError = localContextError(contextStore.getProjectBundle(contextSelection.projectId));
+        if (repositoryContextError) return json(res, 409, { error: repositoryContextError });
       }
       const job = store.beginAnalysis(meetingId, contextSelection ? {
         contextSelectionId: contextSelection.id,
@@ -371,12 +474,14 @@ export function createApp({ config, recall, store, analysis, contextStore = null
           return json(res, 409, { error: 'Context preview was used concurrently. Create a new preview.' });
         }
       }
+      if (contextStore) contextStore.beginAnalysisRun({ id: job.id, meetingId, projectId: contextSelection?.projectId ?? null, contextSelectionId: contextSelection?.id ?? null });
       store.updateMeeting(meetingId, { analysisStatus: 'running' });
       try {
         const generated = await analysis.analyze({ meeting, transcript, projectContext, contextSelection });
         const artifacts = validateAndHydrateArtifacts(generated.output, { meetingId, participants: meeting.participants ?? [], utterances: transcript.utterances, contextSelection });
         const storedArtifacts = store.replaceProposedArtifacts(meetingId, artifacts);
         const completed = store.finishAnalysis(job.id, { status: 'complete', model: generated.model, usage: generated.usage, rateLimit: generated.rateLimit, artifactCount: storedArtifacts.length });
+        if (contextStore) contextStore.finishAnalysisRun(job.id, { status: 'completed', model: generated.model });
         store.updateMeeting(meetingId, { analysisStatus: 'complete', analysisError: null });
         return json(res, 200, { analysis: completed, artifacts: storedArtifacts });
       } catch (error) {
@@ -386,6 +491,7 @@ export function createApp({ config, recall, store, analysis, contextStore = null
               : error instanceof ArtifactValidationError ? 'invalid_output'
                 : error instanceof RangeError ? 'input_too_large'
                   : 'provider_failed';
+        if (contextStore) contextStore.finishAnalysisRun(job.id, { status: 'failed', errorCode: code });
         store.finishAnalysis(job.id, { status: 'failed', error: { code, issues: error instanceof ArtifactValidationError ? error.issues : undefined } });
         store.updateMeeting(meetingId, { analysisStatus: 'failed', analysisError: { code } });
         logger.error('manual-groq-analysis-failed', { meetingId, code });

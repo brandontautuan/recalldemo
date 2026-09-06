@@ -97,12 +97,18 @@ test('binds one verified preview to one explicit manual analysis and hydrates co
     type: 'action_item', title: 'Document the event retry policy', status: 'proposed', description: 'Document the agreed event retry and dead-letter queue policy.', context: null, decision: null,
     alternativesRejected: [], consequences: [], assignee: null, dueDate: null, acceptanceCriteria: ['The retry policy is documented.'], priority: 'medium',
     stepsToReproduce: [], expectedBehavior: null, actualBehavior: null, severity: null, impact: null, mitigation: null, owner: null, question: null, suggestedOwner: null,
+    summary: 'Document the retry policy.', problem: 'The retry policy is not recorded.', whyItMatters: 'Reliable event delivery needs explicit retry rules.', proposedImplementationAreas: ['Event ingestion documentation'], dependencies: [], risks: [], openQuestions: [],
+    repositoryReferences: [],
     evidenceUtteranceIds: ['mock-utterance-1'], contextSourceIds: ['document:doc-event-readme-overview'], confidence: 'high',
   };
   const fixture = fixtureApp(context, () => ({ model: 'openai/gpt-oss-20b', usage: null, rateLimit: {}, output: { artifacts: [generatedArtifact] } }));
   const notes = 'Focus on event ingestion and dead-letter queue reliability.';
   const previewResponse = await invoke(fixture.app, 'POST', '/api/meetings/mock-architecture-review/context-preview', JSON.stringify({ projectId: 'project-event-platform', projectContext: notes }));
   const selection = previewResponse.body.contextSelection;
+  assert.equal((await invoke(fixture.app, 'POST', '/api/meetings/mock-architecture-review/analyze', JSON.stringify({ contextSelectionId: selection.id, projectContext: notes }))).status, 409);
+  assert.equal(fixture.calls().analysisCalls, 0);
+  const approvalResponse = await invoke(fixture.app, 'POST', `/api/meetings/mock-architecture-review/context-preview/${selection.id}/approve`);
+  assert.equal(approvalResponse.status, 200);
   const analysisResponse = await invoke(fixture.app, 'POST', '/api/meetings/mock-architecture-review/analyze', JSON.stringify({ contextSelectionId: selection.id, projectContext: notes }));
   assert.equal(analysisResponse.status, 200);
   assert.equal(fixture.calls().analysisCalls, 1);
@@ -110,8 +116,12 @@ test('binds one verified preview to one explicit manual analysis and hydrates co
   assert.equal(analysisResponse.body.analysis.contextSelectionId, selection.id);
   assert.equal(analysisResponse.body.analysis.contextSelectionSha256, selection.contentSha256);
   assert.equal(analysisResponse.body.artifacts[0].contextProvenance.selectionId, selection.id);
-  assert.deepEqual(analysisResponse.body.artifacts[0].contextProvenance.sources, [{ sourceId: 'document:doc-event-readme-overview', kind: 'readme_excerpt', label: 'Event ingestion overview', revision: 1 }]);
+  assert.deepEqual(analysisResponse.body.artifacts[0].contextProvenance.sources, [{ sourceId: 'document:doc-event-readme-overview', kind: 'readme_excerpt', label: 'Event ingestion overview', revision: 1, sourcePath: 'README.md#architecture', lineStart: null, lineEnd: null, ingestionId: null, truncated: false, trackedFiles: [] }]);
   assert.equal(fixture.contextStore.getContextSelection(selection.id).analysisId, analysisResponse.body.analysis.id);
+  const persistedRun = fixture.contextStore.database.prepare('SELECT status, provider, context_selection_id AS contextSelectionId FROM analysis_runs WHERE id = ?').get(analysisResponse.body.analysis.id);
+  assert.equal(persistedRun.status, 'completed');
+  assert.equal(persistedRun.provider, 'groq');
+  assert.equal(persistedRun.contextSelectionId, selection.id);
   const reused = await invoke(fixture.app, 'POST', '/api/meetings/mock-architecture-review/analyze', JSON.stringify({ contextSelectionId: selection.id, projectContext: notes }));
   assert.equal(reused.status, 409);
   assert.equal(fixture.calls().analysisCalls, 1);
