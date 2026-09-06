@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Engineering Decision Pipeline is a customer-facing reference application built on top of Recall.ai.
+Engineering Decision Pipeline is a customer-facing reference application built on top of Recall.ai. Recall owns the meeting infrastructure: visible bot execution, meeting capture, recording, transcription, participant data, and webhook events. This application owns the bounded autonomous engineering-analysis workflow that turns ready transcripts and supplied project context into reviewable engineering artifacts.
 
 The application demonstrates how a developer can use Recall’s meeting infrastructure to turn architecture reviews, sprint planning meetings, incident reviews, and technical discussions into structured engineering artifacts.
 
@@ -13,11 +13,13 @@ The application is not intended to be a complete project-management platform. It
 * Structured bug reports
 * Risks and open questions
 * Evidence-linked transcript review
-* Linear/Jira-compatible ticket exports
+* Proposed acceptance criteria and Linear/Jira-compatible ticket drafts
 
 The central product principle is:
 
 > Generated engineering artifacts must remain traceable to the conversation that produced them.
+
+The analysis is autonomous within defined stages, structured schemas, and validation rules. It is not an open-ended multi-agent loop and must not claim to know information absent from the transcript or supplied project context.
 
 ## 2. Target User
 
@@ -70,14 +72,34 @@ Application updates meeting status
     ↓
 Application retrieves completed transcript
     ↓
-Transcript is normalized and analyzed
+Transcript is normalized and ingested
     ↓
-Application generates engineering artifacts
+Bounded autonomous engineering analysis runs
     ↓
-User reviews artifacts with transcript evidence
+Artifacts are evidence- and schema-validated
+    ↓
+User reviews queued artifacts with transcript evidence
     ↓
 User approves, edits, rejects, or exports artifacts
 ```
+
+### Autonomous Analysis Pipeline
+
+After a verified Recall webhook confirms that a transcript is ready, the application runs this bounded pipeline:
+
+```text
+Recall webhook
+    → Transcript ingestion
+    → Meeting classification
+    → Project-context enrichment
+    → Engineering analysis
+    → Artifact generation
+    → Evidence and schema validation
+    → Human review queue
+    → Approved export
+```
+
+Each stage receives only the normalized transcript, the bounded output of prior stages, and supplied project context. A failed or invalid stage produces a reviewable failure state; it does not trigger unconstrained retries, autonomous external actions, or unsupported conclusions.
 
 ### Calendar-Based Flow
 
@@ -99,6 +121,28 @@ Meeting artifacts are generated after completion
 
 Calendar recording must be opt-in. The application must not record every calendar event by default.
 
+## 4.1 Responsibility Boundaries
+
+### Recall infrastructure
+
+Recall provides meeting capture, bot execution, recordings, transcription, participant data, and signed lifecycle/webhook events. Recall is the source of meeting artifacts; it does not make the application's engineering decisions.
+
+### Application backend
+
+The backend owns Recall credentials, verified webhook ingestion, local persistence, transcript normalization, project-context handling, and the APIs used by the review interface. It translates Recall resources into internal application models rather than passing raw Recall responses throughout the product.
+
+### Autonomous analysis pipeline
+
+The pipeline classifies a meeting, combines its normalized transcript with explicitly supplied project context, and proposes engineering artifacts. It may run automatically after transcript readiness, but is bounded by defined stages and structured input/output schemas.
+
+### Deterministic validation
+
+Deterministic code validates transcript structure, artifact schemas, evidence references, timestamps, allowed values, duplicate artifacts, and export format. It calculates descriptive transcript metrics such as talk time. It does not use an LLM to confirm unsupported facts.
+
+### Human approval and export
+
+Generated artifacts enter a human review queue. A user may edit, approve, reject, or request more information before export. Only approved artifacts may be exported as Linear/Jira-compatible drafts.
+
 ## 5. MVP Scope
 
 The minimum viable product must include:
@@ -117,6 +161,8 @@ The minimum viable product must include:
 12. Clear README documentation.
 
 Calendar integration should be implemented only after the URL-based flow is stable.
+
+The MVP must not automatically create external Jira or Linear tickets, modify source code, change architecture documents, assign people without transcript evidence, treat assumptions as confirmed decisions, or execute external actions without human approval.
 
 ## 6. Main Application Screens
 
@@ -183,6 +229,8 @@ The dashboard should distinguish between:
 * Transcript evidence
 * Deterministic calculations
 * LLM-generated interpretation
+
+It should also show supplied project context separately from transcript evidence and generated interpretation.
 
 ### 6.4 Evidence Workspace
 
@@ -336,6 +384,14 @@ The application must not claim to understand visual screen-share content unless 
 }
 ```
 
+### 7.6 Proposed Acceptance Criteria
+
+The pipeline may propose acceptance criteria for a decision, action item, or ticket draft when they are supported by transcript evidence or supplied project context. Each criterion must be marked proposed until human approval and must retain evidence references or a clear note that it came from supplied context.
+
+### 7.7 Linear/Jira-Compatible Ticket Draft
+
+A ticket draft is an internal, reviewable artifact containing title, description, priority, proposed acceptance criteria, and evidence. It is exportable only after approval; the pipeline must never create or update an external ticket directly.
+
 ## 8. Talk-Time Analytics
 
 Talk-time analytics should be calculated from the structured transcript rather than guessed by the LLM.
@@ -382,6 +438,18 @@ The Recall integration should support:
 * Handle Recall API errors
 
 The rest of the application should use internal application types instead of raw Recall response objects.
+
+## 9.1 Project Context
+
+Initial project context is explicitly supplied with or before analysis and may include:
+
+* Meeting type
+* Project name
+* Project description
+* Existing system information
+* Required ticket format
+
+The pipeline must distinguish this context from transcript evidence in every generated artifact. Repository retrieval, documentation retrieval, and existing-ticket retrieval are future extensions; none is required for the initial implementation.
 
 ## 10. Backend Endpoints
 
@@ -550,31 +618,31 @@ Normalize transcript
     ↓
 Calculate deterministic analytics
     ↓
-Send compact transcript context to LLM
+Classify meeting and enrich with supplied project context
     ↓
-Validate structured LLM output
+Run bounded engineering analysis and generate structured artifact proposals
     ↓
-Attach evidence references
+Validate schemas, evidence references, timestamps, and unsupported claims
     ↓
-Persist artifacts
+Persist proposed artifacts in the human review queue
     ↓
-Display review state
+Approve, reject, edit, or export approved artifacts
 ```
 
-The LLM should not receive raw application secrets, unrelated meetings, or unnecessary recording data.
+The analysis model must not receive raw application secrets, unrelated meetings, or unnecessary recording data.
 
-The LLM should receive:
+The analysis stage should receive only:
 
 * Meeting type
 * Participant list
 * Normalized transcript
 * Available timestamps
 * Extraction schema
-* Instructions to avoid unsupported claims
+* Instructions to avoid unsupported claims, unsupported assignments, and autonomous external actions
 
-## 13. LLM Output Rules
+## 13. Analysis Output Rules
 
-LLM output must be parsed and validated against a schema.
+Generated analysis output must be parsed and validated against a schema.
 
 The application must handle:
 
@@ -588,9 +656,9 @@ The application must handle:
 * Duplicate artifacts
 * Overly vague action items
 
-The LLM may propose artifacts, but the user must approve them before export.
+The analysis stage may propose artifacts, but the user must approve them before export.
 
-The application must clearly label generated content as proposed until reviewed.
+The application must clearly label generated content as proposed until reviewed. It must reject or flag artifacts with invalid schemas, missing or invalid evidence, unsupported assignees, invalid timestamps, or claims that cannot be traced to the transcript or supplied project context.
 
 ## 14. Calendar Scheduling
 
@@ -633,7 +701,7 @@ The application should display clear user-facing errors for:
 * Transcript unavailable
 * Webhook delivery failure
 * Transcript processing failure
-* LLM extraction failure
+* Analysis extraction failure
 * Calendar authentication failure
 * Duplicate calendar event
 * Missing public callback URL
@@ -726,13 +794,13 @@ The MVP will not include:
 * Calculate talk-time metrics.
 * Add mock transcript support.
 
-### Phase 5: Engineering Intelligence
+### Phase 5: Bounded Autonomous Engineering Analysis
 
-* Define artifact schemas.
-* Implement LLM extraction.
-* Validate LLM output.
-* Attach evidence references.
-* Persist generated artifacts.
+* Define structured schemas for ADRs, action items, bug reports, risks, open questions, proposed acceptance criteria, and ticket drafts.
+* Ingest explicitly supplied project context.
+* Implement bounded meeting classification, context enrichment, engineering analysis, and artifact generation after transcript readiness.
+* Validate generated output, evidence references, timestamps, assignments, and unsupported claims deterministically.
+* Persist valid proposals in a human review queue and persist invalid results as actionable processing failures.
 
 ### Phase 6: Evidence Review
 
@@ -747,6 +815,7 @@ The MVP will not include:
 * Generate Linear/Jira-compatible JSON.
 * Add copy-to-clipboard and download functionality.
 * Document how external systems could consume the payload.
+* Export only user-approved artifacts; do not call external ticket APIs.
 
 ### Phase 8: Calendar Extension
 
@@ -774,13 +843,14 @@ The project is complete when:
 * The backend creates a Recall bot.
 * The bot status is visible in the application.
 * Webhook events update the stored meeting state.
-* A completed transcript can be retrieved and displayed.
+* A completed transcript can be retrieved, normalized, and displayed.
 * Speaker and timestamp information are preserved.
 * Talk-time metrics are calculated deterministically.
-* Engineering artifacts are generated using a defined schema.
-* Generated artifacts link to transcript evidence.
+* The bounded autonomous pipeline generates engineering artifact proposals using defined schemas and only transcript evidence plus supplied project context.
+* Generated artifacts link to transcript evidence and distinguish any supplied project context.
 * Users can review, edit, approve, or reject artifacts.
 * Approved action items can be exported as JSON.
+* No artifact automatically creates external tickets, modifies code or documents, assigns people without evidence, or executes external actions.
 * Mock mode supports a reliable demo.
 * Calendar scheduling works or is clearly documented as a deferred feature.
 * Tests cover important success and failure paths.
@@ -791,7 +861,7 @@ The project is complete when:
 
 The demo should communicate this story:
 
-> Engineering teams already have important technical decisions and commitments inside their meetings. Recall handles the difficult infrastructure of joining, recording, diarizing, and transcribing those meetings. This application shows how a customer can build a differentiated workflow on top of that data: turning a technical sync into reviewable ADRs, tickets, risks, and open questions while preserving a direct link back to the original conversation.
+> Engineering teams already have important technical decisions and commitments inside their meetings. Recall handles the difficult infrastructure of joining, recording, diarizing, and transcribing those meetings. This application runs a bounded autonomous analysis pipeline on the resulting transcript and supplied project context to propose reviewable ADRs, ticket drafts, risks, and open questions while preserving a direct link back to the original conversation. Humans retain approval over every export and every external action.
 
 The strongest demonstration should show:
 
@@ -799,7 +869,7 @@ The strongest demonstration should show:
 2. Receiving and displaying status updates.
 3. Opening a completed meeting.
 4. Viewing talk-time analytics.
-5. Selecting an extracted ADR or ticket.
+5. Viewing the bounded analysis pipeline's proposed ADR or ticket draft and its evidence.
 6. Jumping to the supporting transcript evidence.
 7. Editing and approving the artifact.
 8. Exporting the resulting ticket JSON.
