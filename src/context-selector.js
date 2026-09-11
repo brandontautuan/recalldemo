@@ -1,3 +1,4 @@
+/** Deterministically selects bounded, reviewable project context without embeddings or an LLM. */
 import crypto from 'node:crypto';
 import { canonicalJson } from './context-seed.js';
 

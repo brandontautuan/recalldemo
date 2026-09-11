@@ -1,3 +1,4 @@
+/** Strict validation and deterministic hashing for the deliberate local project-context seed import. */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';

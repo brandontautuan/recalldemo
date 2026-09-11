@@ -1,3 +1,4 @@
+/** Verifies Recall/Svix webhook signatures against the untouched raw request body. */
 import crypto from 'node:crypto';
 
 export function verifyRecallRequest(secret, headers, rawBody) {

@@ -1,3 +1,4 @@
+/** Isolated Recall API client; it owns transport retries but never application lifecycle decisions. */
 const transientReadFailures = new Set([503, 507]);
 
 export class RecallClient {
@@ -13,6 +14,7 @@ export class RecallClient {
       headers: { Authorization: this.apiKey, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
+    // Only explicit rate limits and safe read failures retry; other write failures remain ambiguous to the caller.
     const mayRetry = response.status === 429 || (method === 'GET' && transientReadFailures.has(response.status));
     if (mayRetry && attempt < 3) {
       const retryAfter = Number(response.headers.get('retry-after'));
@@ -24,11 +26,11 @@ export class RecallClient {
     return response.status === 204 ? null : response.json();
   }
 
-  createBot({ meetingUrl, joinAt = new Date().toISOString(), intentId }) {
+  createBot({ meetingUrl, joinAt = new Date().toISOString(), intentId, schedulingKey }) {
     return this.request('/api/v1/bot/', { method: 'POST', body: {
       meeting_url: meetingUrl, join_at: joinAt, bot_name: 'Recall Notetaker',
       recording_config: { video_mixed_layout: 'speaker_view' },
-      metadata: { source: 'meeting-url', scheduling_intent_id: intentId },
+      metadata: { source: 'meeting-url', scheduling_intent_id: intentId, scheduling_key: schedulingKey },
     }});
   }
 
@@ -43,6 +45,7 @@ export class RecallClient {
   getTranscript(id) { return this.request(`/api/v1/transcript/${id}/`); }
   async downloadTranscript(downloadUrl) {
     const url = new URL(downloadUrl);
+    // Treat the provider URL as untrusted input so a webhook cannot turn this server into an arbitrary fetch proxy.
     if (url.protocol !== 'https:' || url.hostname !== `${this.baseUrl.slice('https://'.length)}`) {
       throw new Error('Recall returned an invalid transcript download URL.');
     }

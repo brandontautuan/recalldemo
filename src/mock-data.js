@@ -1,3 +1,4 @@
+/** Clearly labeled deterministic fixtures used only for mock-mode demos and automated tests. */
 import { calculateMeetingAnalytics } from './transcript.js';
 
 const utterances = [

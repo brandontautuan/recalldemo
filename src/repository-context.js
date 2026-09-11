@@ -1,3 +1,4 @@
+/** Safely reads only explicitly approved documentation under server-approved repository roots. */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';

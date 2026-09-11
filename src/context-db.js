@@ -1,3 +1,4 @@
+/** SQLite persistence for reviewed project context, immutable selections, and migration integrity. */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -46,6 +47,7 @@ export class ProjectContextStore {
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   }
 
+  // Checksums make edited historical migrations fail loudly instead of silently changing an existing database's model.
   migrate() {
     this.database.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -324,6 +326,12 @@ export class ProjectContextStore {
     return true;
   }
 
+  releaseContextSelectionFromAnalysis(id, analysisId) {
+    // A failed provider run creates no reviewable artifact, so retain the approved snapshot for an explicit retry.
+    const update = this.database.prepare('UPDATE context_selections SET analysis_id = NULL WHERE id = ? AND analysis_id = ?').run(id, analysisId);
+    return Number(update.changes) === 1;
+  }
+
 
   stageRepositoryIngestion({ projectId, repositoryId, scan }) {
     const existing = this.database.prepare("SELECT id FROM context_ingestions WHERE project_id = ? AND repository_id = ? AND source_fingerprint = ? AND status IN ('pending_review', 'approved') ORDER BY created_at DESC LIMIT 1")
@@ -362,8 +370,9 @@ export class ProjectContextStore {
       this.database.prepare('UPDATE context_documents SET is_active = 0 WHERE project_id = ? AND repository_id = ? AND ingestion_id IS NOT NULL').run(projectId, ingestion.repositoryId);
       this.database.prepare("UPDATE context_ingestions SET status = 'approved', approved_at = ? WHERE id = ?").run(approvedAt, id);
       this.database.prepare('UPDATE context_documents SET is_active = 1, approved_at = ? WHERE ingestion_id = ?').run(approvedAt, id);
+      const repository = this.database.prepare('SELECT metadata_json FROM repositories WHERE id = ?').get(ingestion.repositoryId);
       this.database.prepare('UPDATE repositories SET metadata_json = ?, updated_at = ? WHERE id = ?')
-        .run(JSON.stringify({ source: 'approved_local_repository', commitVersion: ingestion.commitVersion, trackedFiles: ingestion.trackedFiles }), approvedAt, ingestion.repositoryId);
+        .run(JSON.stringify({ ...JSON.parse(repository.metadata_json), commitVersion: ingestion.commitVersion, trackedFiles: ingestion.trackedFiles }), approvedAt, ingestion.repositoryId);
       this.database.exec('COMMIT;');
       return this.getContextIngestion(id);
     } catch (error) {

@@ -1,3 +1,4 @@
+/** Converts approved artifact versions into local-only canonical, Linear, or Jira draft payloads. */
 export const exportFormats = ['canonical', 'linear', 'jira'];
 
 export class ExportValidationError extends Error {

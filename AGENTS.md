@@ -70,6 +70,21 @@ Never expose API keys or secrets to the frontend, logs, README, screenshots, or 
 
 Comments should explain intent, constraints, or non-obvious decisions—not restate what the code already says.
 
+### This codebase's comment and documentation standard
+
+Use concise comments at the boundaries where this application changes the meaning, trust level, or lifetime of data:
+
+* **HTTP entry points (`src/app.js`, `src/server.js`):** explain validation, authentication, idempotency, background processing, and why an endpoint returns before provider work is complete.
+* **Persistence (`src/store.js`, `src/context-db.js`, migrations):** explain durable-model invariants, migration safety, and why a record or field has a separate lifecycle. Document schema intent in migrations when it is not clear from table or column names.
+* **External adapters (`src/recall-client.js`, `src/groq-client.js`):** explain provider-specific retries, response normalization, trusted URL restrictions, and limitations that the adapter shields the rest of the app from.
+* **Recall meeting flow (`src/lifecycle.js`, `src/transcript.js`):** explain why provider events are normalized, ordered, or deduplicated; why an apparently missing bot, recording, or transcript field is handled defensively; and the speaker/timestamp assumptions used in analytics.
+* **AI artifacts (`src/artifacts.js` and analysis routes):** explain why generated output is schema- and evidence-validated before it can be saved, reviewed, exported, or shown as a proposal.
+* **Browser data access (`public/index.html`, `public/context-ui-state.js`):** explain polling, state refreshes, and protections that preserve unsaved edits. Do not annotate self-explanatory rendering or event-handler wiring.
+
+This is a small take-home-style Node application, not a LiveKit or real-time voice-session service. Do not introduce LiveKit terminology or comments. Describe the actual flow instead: meeting URL or calendar event → Recall bot → signed Recall webhook or reconciliation → normalized transcript → reviewable artifacts. Webhook delivery and periodic dashboard polling are the only current near-real-time mechanisms.
+
+Do not add boilerplate headers to every module, comments to generated files, dependencies, virtual environments, migrations whose SQL is already self-explanatory, or UI-only code with no non-obvious behavior. Keep README and design documents consistent with these boundaries; document implemented behavior separately from future work and state intentional limitations plainly.
+
 Good comments explain:
 
 * Why a workaround exists.
@@ -78,6 +93,8 @@ Good comments explain:
 * Why a field is normalized or transformed.
 * What assumption the application makes about speaker roles.
 * What is intentionally out of scope.
+
+For this project, useful examples include why a Recall lifecycle code is mapped into a canonical state, why webhook IDs and transcript-result claims prevent duplicate delivery from causing duplicate work, why an absent provider field is treated as unavailable rather than inferred, why the transcript parser's speaker role is only an observed label, why generated artifacts require source utterance IDs, and why local repository context must be explicitly reviewed before analysis.
 
 Avoid comments such as:
 

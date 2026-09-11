@@ -1,3 +1,4 @@
+/** Normalizes Recall transcript downloads into evidence-bearing utterances and deterministic metrics. */
 const timestamp = (value) => {
   if (!value || typeof value !== 'object') return null;
   const relative = typeof value.relative === 'number' && Number.isFinite(value.relative) ? value.relative : null;
@@ -34,6 +35,7 @@ export function normalizeTranscript(payload) {
     const words = validWords(part?.words);
     if (!words.length) continue;
     const participant = part?.participant && typeof part.participant === 'object' ? part.participant : {};
+    // Recall may omit participant data; preserve that absence instead of inventing an identity or role.
     const speakerName = typeof participant.name === 'string' && participant.name.trim() ? participant.name.trim() : 'Unknown speaker';
     const speakerId = participant.id === undefined || participant.id === null ? null : String(participant.id);
     const key = speakerId ?? speakerName;

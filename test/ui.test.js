@@ -49,7 +49,7 @@ test('dashboard exposes explicit preview, confirmation-only analysis, and separa
   assert.match(contextStateModule, /contextSelectionId/);
   assert.match(indexHtml, /Retrieved project context/);
   assert.match(indexHtml, /Transcript evidence/);
-  assert.match(indexHtml, /Approved local project context/);
+  assert.match(indexHtml, /One-time repository setup/);
   assert.match(indexHtml, /Scan project context/);
   assert.match(indexHtml, /Approve collected context/);
   assert.match(indexHtml, /Approve context snapshot/);
@@ -62,6 +62,101 @@ test('mock-mode UI exposes a confirmed fixture reset and explicit privacy bounda
   assert.match(indexHtml, /stores the normalized transcript locally, not recording media/);
   assert.match(indexHtml, /sent to Groq only after you explicitly confirm analysis/);
   assert.match(indexHtml, /Canonical application JSON \(recommended\)/);
+  assert.match(indexHtml, /Show meeting workflow/);
+  assert.match(indexHtml, /local-recap-mode/);
+});
+
+test('dashboard exposes a preview-gated local manual transcript workflow', () => {
+  assert.match(indexHtml, /Create a manual transcript/);
+  assert.match(indexHtml, /Load sample transcript/);
+  assert.match(indexHtml, /Preview parsed transcript/);
+  assert.match(indexHtml, /Create manual meeting/);
+  assert.match(indexHtml, /\/api\/manual-transcripts\/preview/);
+  assert.match(indexHtml, /\/api\/manual-meetings/);
+  assert.match(indexHtml, /does not contact Recall or Groq/);
+  assert.match(indexHtml, /manualPreviewFingerprint/);
+});
+
+test('the normalized transcript collapses and survives the dashboard poll', () => {
+  // Collapsed by default, with the utterance count readable without expanding.
+  assert.match(indexHtml, /node\('details', undefined, 'transcript-panel'\)/);
+  assert.match(indexHtml, /transcriptSection\.open = expandedTranscripts\.has\(meeting\.id\)/);
+  assert.match(indexHtml, /'utterance' : 'utterances'/);
+  // The poll calls replaceChildren on every card, so the open set is what keeps a panel open.
+  assert.match(indexHtml, /const expandedTranscripts = new Set\(\)/);
+  assert.match(indexHtml, /expandedTranscripts\.add\(meeting\.id\)/);
+  assert.match(indexHtml, /expandedTranscripts\.delete\(meeting\.id\)/);
+  // Evidence jumps must still land when the panel is closed.
+  assert.match(indexHtml, /target\.closest\('\.transcript-panel'\)/);
+  assert.match(indexHtml, /if \(panel && !panel\.open\)/);
+  // Expanded height is capped so a long transcript still cannot fill the screen.
+  assert.match(indexHtml, /\.transcript-turns \{ max-height: 30rem; overflow-y: auto;/);
+});
+
+test('a stored analysis result from an earlier session is not replayed on the meeting card', () => {
+  // A failure the user did not trigger in this page session must not render at all.
+  assert.match(indexHtml, /const analysisRequestedHere = new Set\(\)/);
+  assert.match(indexHtml, /analysis && analysisRequestedHere\.has\(meeting\.id\)/);
+  assert.match(indexHtml, /analysisRequestedHere\.add\(meeting\.id\)/);
+  // An in-flight run still reports itself regardless of who started it.
+  assert.match(indexHtml, /analysis\?\.status === 'running'\) card\.append\(node\('p', 'Groq analysis: running…'/);
+  // Suppressed from the card is not the same as discarded: it still reaches the console, once.
+  assert.match(indexHtml, /console\.warn\('Groq analysis failed'/);
+  assert.match(indexHtml, /const loggedAnalysisFailures = new Set\(\)/);
+  assert.match(indexHtml, /!loggedAnalysisFailures\.has\(analysis\.id\)/);
+  assert.match(indexHtml, /loggedAnalysisFailures\.add\(analysis\.id\)/);
+});
+
+test('the meeting card offers an inline rename that persists through the API', () => {
+  assert.match(indexHtml, /node\('button', 'Rename', 'title-action'\)/);
+  assert.match(indexHtml, /method: 'PATCH'/);
+  assert.match(indexHtml, /fetch\(`\/api\/meetings\/\$\{encodeURIComponent\(meeting\.id\)\}`/);
+  // An in-progress draft must survive the poll that rebuilds every card.
+  assert.match(indexHtml, /const renamingMeetings = new Map\(\)/);
+  assert.match(indexHtml, /renamingMeetings\.set\(meeting\.id, input\.value\)/);
+  // Keyboard affordances and a cancel path.
+  assert.match(indexHtml, /event\.key === 'Enter'/);
+  assert.match(indexHtml, /event\.key === 'Escape'/);
+  assert.match(indexHtml, /input\.maxLength = 200/);
+});
+
+test('the transcript panel is themed in dark mode like every other card', () => {
+  const darkBlock = indexHtml.slice(indexHtml.indexOf('@media (prefers-color-scheme: dark)'));
+  // The panel is a <details>, so the section/article card rules do not reach it on their own.
+  assert.match(darkBlock, /section, article, \.context-preview, \.transcript-panel \{ background: #182335;/);
+  assert.match(darkBlock, /\.transcript-turns \{ border-color: #30425f; \}/);
+  assert.match(darkBlock, /\.transcript-panel > summary::before[^}]*color: #7fa6ff;/);
+});
+
+test('dashboard exposes a server-authorized local repository context form', () => {
+  assert.match(indexHtml, /One-time repository setup/);
+  assert.match(indexHtml, /Local repository path/);
+  assert.match(indexHtml, /\/api\/projects\/local/);
+  assert.match(indexHtml, /projectAdminHeaders/);
+  assert.doesNotMatch(indexHtml, /github/i);
+});
+
+test('dashboard exposes a separate local ticket workspace with explicit source-linked creation', () => {
+  assert.match(indexHtml, /id="tickets-tab-button"/);
+  assert.match(indexHtml, /Local tickets/);
+  assert.match(indexHtml, /Create local ticket/);
+  assert.match(indexHtml, /artifact version/);
+  assert.match(indexHtml, /\/api\/meetings\/\$\{encodeURIComponent\(meeting\.id\)\}\/tickets/);
+  assert.match(indexHtml, /\/api\/tickets\/\$\{encodeURIComponent\(ticket\.id\)\}/);
+});
+
+test('dashboard exposes an explicit preview-gated local context recap workflow', () => {
+  assert.match(indexHtml, /Ask your repository/);
+  assert.match(indexHtml, /1\. Preview sources/);
+  assert.match(indexHtml, /Ask Groq for recap/);
+  assert.match(indexHtml, /local-recap-preview/);
+  assert.match(indexHtml, /local-recap/);
+  assert.match(indexHtml, /does not read arbitrary files/);
+  assert.match(indexHtml, /Preview sources before asking Groq for a recap/);
+  assert.match(indexHtml, /Step 1: preview the exact local sources/);
+  assert.match(indexHtml, /recapButton\.hidden/);
+  assert.match(indexHtml, /recap-form/);
+  assert.match(indexHtml, /recap-admin-token/);
 });
 
 test('application serves the browser context-state module as JavaScript', async () => {

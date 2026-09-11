@@ -1,3 +1,4 @@
+/** Production entry point: wires validated configuration, provider clients, stores, and HTTP server. */
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { createConfig } from './config.js';
@@ -10,6 +11,7 @@ import { ProjectContextStore } from './context-db.js';
 
 const smoke = process.argv.includes('--smoke');
 const config = createConfig(process.env);
+// SQLite holds reviewed project context separately so transient meeting-state writes cannot alter approved inputs.
 const contextStore = new ProjectContextStore(smoke ? ':memory:' : config.databasePath);
 contextStore.migrate();
 const store = new JsonStore();
@@ -18,8 +20,10 @@ const recall = config.mockMode ? new MockRecallClient() : new RecallClient(confi
 const analysis = new GroqClient({
   apiKey: config.groqApiKey,
   model: config.groqModel,
+  reasoningEffort: config.groqReasoningEffort,
   maximumConcurrency: config.groqMaximumConcurrency,
   maximumInputCharacters: config.groqMaximumInputCharacters,
+  maximumOutputTokens: config.groqMaximumOutputTokens,
 });
 const app = createApp({ config, recall, store, analysis, contextStore });
 if (smoke) {

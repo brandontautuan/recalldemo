@@ -1,3 +1,4 @@
+/** Demo JSON store for meeting state, webhook idempotency, analysis jobs, and review audit history. */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -37,6 +38,8 @@ export class JsonStore {
       artifacts: stored.artifacts ?? {},
       analyses: stored.analyses ?? {},
       reviewEvents: stored.reviewEvents ?? {},
+      tickets: stored.tickets ?? {},
+      ticketEvents: stored.ticketEvents ?? {},
     };
     for (const meeting of Object.values(this.data.meetings)) normalizeMeetingLifecycle(meeting);
   }
@@ -53,6 +56,7 @@ export class JsonStore {
   addIntent(intent) { return this.addMeeting(intent); }
   updateIntent(id, patch) { return this.updateMeeting(id, patch); }
   findMeetingByBotId(botId) { return Object.values(this.data.meetings).find((meeting) => meeting.botId === botId || meeting.recallBotId === botId) ?? null; }
+  findMeetingBySchedulingKey(schedulingKey) { return Object.values(this.data.meetings).find((meeting) => meeting.schedulingKey === schedulingKey) ?? null; }
   findTranscriptByMeetingId(meetingId) { return Object.values(this.data.transcripts).find((transcript) => transcript.meetingId === meetingId) ?? null; }
   getTranscript(id) { return this.data.transcripts[id] ?? null; }
   recordLifecycle(lifecycle) {
@@ -80,7 +84,11 @@ export class JsonStore {
     if (!duplicate) history.push(entry);
     history.sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
     meeting.statusHistory = history;
-    if (entry.attempt === meeting.lifecycleAttempt && entry.status && canAdvanceMeetingState(meeting.status, entry.status)) {
+    // A failed Create Bot response is ambiguous: a later Recall lifecycle event proves the bot exists.
+    const recoveredFromAmbiguousCreation = meeting.status === 'failed'
+      && meeting.error?.code === 'bot_create_failed'
+      && entry.status !== 'failed';
+    if (entry.attempt === meeting.lifecycleAttempt && entry.status && (recoveredFromAmbiguousCreation || canAdvanceMeetingState(meeting.status, entry.status))) {
       this.applyMeetingState(meeting, entry.status, entry);
     }
     meeting.updatedAt = new Date().toISOString();
@@ -146,11 +154,28 @@ export class JsonStore {
     for (const [id, reviewEvent] of Object.entries(this.data.reviewEvents)) {
       if (reviewEvent.meetingId === meetingId) delete this.data.reviewEvents[id];
     }
+    for (const [id, ticket] of Object.entries(this.data.tickets)) if (ticket.meetingId === meetingId) delete this.data.tickets[id];
+    for (const [id, ticketEvent] of Object.entries(this.data.ticketEvents)) if (ticketEvent.meetingId === meetingId) delete this.data.ticketEvents[id];
     this.data.meetings[meetingId] = normalizeMeetingLifecycle(structuredClone(meeting));
     this.data.transcripts[transcript.id] = structuredClone(transcript);
     for (const artifact of artifacts) this.data.artifacts[artifact.id] = structuredClone(artifact);
     this.persist();
     return this.getMeeting(meetingId);
+  }
+  deleteManualMeeting(meetingId) {
+    const meeting = this.getMeeting(meetingId);
+    if (!meeting || meeting.source !== 'manual') return { deleted: false, reason: 'not_manual' };
+    const reviewEvents = this.reviewEventsForMeeting(meetingId).filter((event) => event.action !== 'generated');
+    if (reviewEvents.length) return { deleted: false, reason: 'reviewed' };
+    delete this.data.meetings[meetingId];
+    for (const [id, transcript] of Object.entries(this.data.transcripts)) if (transcript.meetingId === meetingId) delete this.data.transcripts[id];
+    for (const [id, artifact] of Object.entries(this.data.artifacts)) if (artifact.meetingId === meetingId) delete this.data.artifacts[id];
+    for (const [id, analysis] of Object.entries(this.data.analyses)) if (analysis.meetingId === meetingId) delete this.data.analyses[id];
+    for (const [id, event] of Object.entries(this.data.reviewEvents)) if (event.meetingId === meetingId) delete this.data.reviewEvents[id];
+    for (const [id, ticket] of Object.entries(this.data.tickets)) if (ticket.meetingId === meetingId) delete this.data.tickets[id];
+    for (const [id, ticketEvent] of Object.entries(this.data.ticketEvents)) if (ticketEvent.meetingId === meetingId) delete this.data.ticketEvents[id];
+    this.persist();
+    return { deleted: true };
   }
   beginAnalysis(meetingId, metadata = {}) {
     const active = Object.values(this.data.analyses).find((analysis) => analysis.meetingId === meetingId && analysis.status === 'running');
@@ -264,10 +289,40 @@ export class JsonStore {
     return Object.values(this.data.reviewEvents).filter((event) => event.meetingId === meetingId).sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
   }
   artifactsForMeeting(meetingId) { return Object.values(this.data.artifacts).filter((artifact) => artifact.meetingId === meetingId); }
+  ticketForArtifactVersion(artifactId, artifactVersion) {
+    return Object.values(this.data.tickets).find((ticket) => ticket.sourceArtifactId === artifactId && ticket.sourceArtifactVersion === artifactVersion) ?? null;
+  }
+  createTicket(ticket) {
+    const existing = this.ticketForArtifactVersion(ticket.sourceArtifactId, ticket.sourceArtifactVersion);
+    if (existing) return { ticket: existing, created: false };
+    this.data.tickets[ticket.id] = ticket;
+    this.recordTicketEvent(ticket, 'created', { version: ticket.version }, false);
+    this.persist();
+    return { ticket, created: true };
+  }
+  getTicket(id) { return this.data.tickets[id] ?? null; }
+  updateTicket(id, { expectedVersion, status, priority, owner, notes }) {
+    const ticket = this.getTicket(id);
+    if (!ticket) return null;
+    if (ticket.version !== expectedVersion) return { conflict: true, ticket };
+    const before = { status: ticket.status, priority: ticket.priority, owner: ticket.owner, notes: ticket.notes };
+    Object.assign(ticket, { status, priority, owner, notes, version: ticket.version + 1, updatedAt: new Date().toISOString() });
+    this.recordTicketEvent(ticket, 'updated', { from: before, to: { status, priority, owner, notes }, version: ticket.version }, false);
+    this.persist();
+    return { ticket, conflict: false };
+  }
+  recordTicketEvent(ticket, action, details, shouldPersist = true) {
+    const event = { id: crypto.randomUUID(), ticketId: ticket.id, meetingId: ticket.meetingId, action, actor: 'local_user', occurredAt: new Date().toISOString(), ...details };
+    this.data.ticketEvents[event.id] = event;
+    if (shouldPersist) this.persist();
+    return event;
+  }
+  ticketEventsForTicket(ticketId) { return Object.values(this.data.ticketEvents).filter((event) => event.ticketId === ticketId).sort((left, right) => left.occurredAt.localeCompare(right.occurredAt)); }
+  tickets() { return Object.values(this.data.tickets).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)); }
   dashboard() {
     const meetings = Object.values(this.data.meetings)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map((meeting) => ({ ...meeting, recoveryActions: recoveryActionsForMeeting(meeting) }));
-    return { mockMode: false, meetings, intents: meetings, transcripts: Object.values(this.data.transcripts), artifacts: Object.values(this.data.artifacts), analyses: Object.values(this.data.analyses), reviewEvents: Object.values(this.data.reviewEvents) };
+    return { mockMode: false, meetings, intents: meetings, transcripts: Object.values(this.data.transcripts), artifacts: Object.values(this.data.artifacts), analyses: Object.values(this.data.analyses), reviewEvents: Object.values(this.data.reviewEvents), tickets: this.tickets(), ticketEvents: Object.values(this.data.ticketEvents) };
   }
 }

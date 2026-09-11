@@ -1,3 +1,4 @@
+/** Deliberate CLI entry point for applying checked-in project-context SQLite migrations. */
 import { ProjectContextStore } from '../context-db.js';
 
 const contextStore = new ProjectContextStore(process.env.DATABASE_PATH || 'data/project-context.sqlite');

@@ -109,6 +109,17 @@ Recall webhook → Transcript ingestion → Ready state
 
 Each stage receives only the normalized transcript, the bounded output of prior stages, and supplied or retrieved project context. A failed or invalid stage produces a reviewable failure state; it does not trigger unconstrained retries, autonomous external actions, or unsupported conclusions.
 
+### Manual Transcript Import
+
+When `MANUAL_TRANSCRIPT_ENABLED=true` (the mock-mode default), the dashboard also accepts owner-pasted text as a local `manual` transcript source:
+
+```text
+Paste supported text → Preview deterministic parse → Create completed local meeting
+    → Optional approved context preview → Explicit Groq confirmation → Human review and export
+```
+
+This path does not create a Recall bot, send or receive a Recall webhook, create a recording, or invoke Groq during preview or creation. Speaker names from speaker-line input are labels supplied in the text; a plain-paragraph import uses an owner-supplied default label and does not claim diarization or role inference. Manual source text is user-supplied and is not verified by Recall.
+
 ### Calendar-Based Flow
 
 Calendar scheduling is a secondary flow.
@@ -139,6 +150,10 @@ Recall provides meeting capture, bot execution, recordings, transcription, parti
 
 The backend owns Recall credentials, verified webhook ingestion, local persistence, transcript normalization, project-context handling, and the APIs used by the review interface. It translates Recall resources into internal application models rather than passing raw Recall responses throughout the product.
 
+### Manual transcript boundary
+
+`src/manual-transcript.js` is a pure parser and validator. It accepts only the documented text formats, produces normalized utterances and deterministic warnings, and does not call Recall, Groq, persistence, or the network. `src/app.js` owns the thin preview/create/delete routes and records manual provenance without fabricating Recall identifiers or lifecycle events.
+
 ### Manual analysis pipeline
 
 After an explicit user request, the pipeline combines its normalized transcript with explicitly supplied context and, when the user has selected a project, a deterministic bounded project-context snapshot. It proposes engineering artifacts through Groq. It never runs automatically after transcript readiness and is bounded by defined stages and structured input/output schemas.
@@ -150,6 +165,10 @@ Deterministic code validates transcript structure, artifact schemas, evidence re
 ### Human approval and export
 
 Generated artifacts enter a human review queue. A user may edit, approve, reject, or request more information before export. Only approved artifacts may be exported as Linear/Jira-compatible drafts.
+
+### Local ticket workspace
+
+The Tickets tab is a separate local work queue, not an automatic consequence of model output. Only an approved `action_item` or `bug_report` may create a ticket. Creation captures the source artifact ID and exact approved version, transcript evidence, and selected-context provenance as an immutable source snapshot. Local work fields—status, priority, owner text, and notes—have their own versioned edits and audit events. A repeated create request for the same source artifact version returns the existing ticket. The current implementation makes no Notion, Linear, Jira, or other ticket-system call.
 
 ## 4.2 Canonical Meeting State Machine
 
@@ -196,7 +215,7 @@ failed → terminal for that capture attempt
 
 The current state may repeat when distinct provider events map to the same canonical state. Some intermediate states may be skipped when Recall delivers a later authoritative event first. Skipping is allowed; regression is not. For example, `recording` may arrive before `joining`, but a later-delivered older `joining` event must be inserted into history without moving the current state backward. A fatal event is sticky for its capture attempt and cannot be hidden by a later `bot.done` delivery.
 
-`completed` and `failed` are terminal meeting-capture states. Manual transcript recovery or a new bot attempt creates a separately recorded retry attempt rather than erasing the terminal history. Artifact analysis has its own state machine:
+`completed` and `failed` are terminal meeting-capture states. A Recall transcript-processing recovery or a new bot attempt creates a separately recorded retry attempt rather than erasing terminal history. Manual transcript imports are created directly in `completed` and do not have a Recall lifecycle attempt. Artifact analysis has its own state machine:
 
 ```text
 not_started → running → completed | failed
@@ -477,15 +496,15 @@ Talk-time analytics are descriptive only. The application should not automatical
 
 Recall-specific code must be isolated behind a dedicated integration layer.
 
-Suggested modules:
+Implemented Recall boundary:
 
 ```text
-server/
-├── recall/
-│   ├── recall-client.ts
-│   ├── recall-types.ts
-│   ├── recall-webhooks.ts
-│   └── recall-transcripts.ts
+src/
+├── recall-client.js
+├── lifecycle.js
+├── transcript.js
+├── verify.js
+└── app.js
 ```
 
 The Recall integration should support:
@@ -576,6 +595,14 @@ POST /api/meetings
 ```
 
 Creates a Recall bot for a submitted meeting URL.
+
+```text
+POST /api/manual-transcripts/preview
+POST /api/manual-meetings
+DELETE /api/manual-meetings/:id
+```
+
+The preview route validates and normalizes owner-pasted text without persistence or external calls. The create route stores a completed `manual` meeting and transcript without creating Recall resources or invoking Groq. Delete is limited to unreviewed manual meetings so reviewed records retain local audit history.
 
 ```text
 GET /api/meetings
@@ -673,6 +700,8 @@ The application should persist enough data to support retries, review, and evide
 
 ```text
 id
+source (`recall` or `manual` when applicable)
+sourceMetadata
 recallBotId
 meetingUrl
 title
@@ -694,6 +723,8 @@ updatedAt
 ```text
 id
 meetingId
+source (`recall` or `manual` when applicable)
+sourceMetadata
 speakerId
 speakerName
 text
@@ -716,6 +747,29 @@ evidence
 createdAt
 updatedAt
 ```
+
+### Local Ticket
+
+```text
+id
+meetingId
+sourceArtifactId
+sourceArtifactVersion
+type
+title
+description
+status
+priority
+owner
+notes
+evidence
+contextProvenance
+version
+createdAt
+updatedAt
+```
+
+Source artifact fields and evidence are retained as a snapshot so a later artifact edit cannot silently change a ticket already being worked locally.
 
 ### Webhook Event
 

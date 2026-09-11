@@ -1,16 +1,20 @@
+/** HTTP application boundary: validates requests, coordinates providers, and returns safe view models. */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { verifyRecallRequest } from './verify.js';
 import { calculateMeetingAnalytics, normalizeTranscript } from './transcript.js';
 import { normalizeLifecycleEvent, normalizeRetrievedStatus } from './lifecycle.js';
-import { ArtifactValidationError, validateAndHydrateArtifacts, validateArtifactRevision } from './artifacts.js';
-import { GroqBusyError, GroqConfigurationError, GroqRateLimitError } from './groq-client.js';
+import { ArtifactValidationError, validateAndHydrateSupportedArtifacts, validateArtifactRevision } from './artifacts.js';
+import { buildAnalysisInput, GroqBusyError, GroqConfigurationError, GroqProviderError, GroqRateLimitError, GroqTruncatedOutputError } from './groq-client.js';
 import { createArtifactExport, ExportValidationError, ExportVersionConflictError, safeExportFilename } from './export.js';
 import { buildContextSelection, projectContextHash } from './context-selector.js';
 import { ContextSelectionIntegrityError } from './context-db.js';
 import { mockFixture } from './mock-data.js';
 import { RepositoryContextError, resolveApprovedRepositoryPath, scanApprovedRepository } from './repository-context.js';
+import { ManualTranscriptValidationError, parseManualTranscript } from './manual-transcript.js';
+import { LocalRecapValidationError, recapPreviewHash, recapQuestionHash, validateLocalRecap } from './local-recap.js';
+import { TicketValidationError, ticketFromArtifact, validateTicketUpdate } from './tickets.js';
 
 const publicDir = path.resolve('public');
 const titleOf = (event) => event.raw?.summary ?? event.raw?.title ?? event.title ?? '';
@@ -35,7 +39,48 @@ const validMeetingUrl = (value) => {
   }
 };
 
+const canonicalMeetingUrl = (value) => {
+  const url = new URL(value);
+  url.hash = '';
+  url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  url.searchParams.sort();
+  return url.toString();
+};
+
+const normalizedJoinAt = (value, now = new Date()) => {
+  if (value === undefined || value === null || value === '') return now.toISOString();
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? null : date.toISOString();
+};
+
+/** Recall does not deduplicate direct Create Bot requests, so this key defines one meeting instance locally. */
+export const directMeetingSchedulingKey = ({ meetingUrl, joinAt }) => crypto
+  .createHash('sha256')
+  .update(`${canonicalMeetingUrl(meetingUrl)}\n${joinAt}`)
+  .digest('hex');
+
 export function createApp({ config, recall, store, analysis, contextStore = null, logger = console }) {
+  const boundedMeetingContextPreview = ({ bundle, meeting, transcript, projectContext }) => {
+    let contextCharacterBudget = config.projectContextMaximumCharacters;
+
+    // Context source text is only one part of the Groq request. Reserve room for the exact serialized
+    // transcript, meeting metadata, notes, and immutable source envelope before a user can approve it.
+    for (;;) {
+      const preview = buildContextSelection({ ...bundle, meeting, transcript, projectContext, maximumCharacters: contextCharacterBudget });
+      const previewForAnalysis = {
+        ...preview.selection,
+        id: '0'.repeat(36),
+        contentSha256: preview.contentSha256,
+      };
+      const input = buildAnalysisInput({ meeting, transcript, projectContext, contextSelection: previewForAnalysis });
+      if (input.length <= config.groqMaximumInputCharacters) return preview;
+      if (preview.selection.characterCount === 0) {
+        throw new RangeError(`Transcript analysis input exceeds ${config.groqMaximumInputCharacters} characters before repository context is added.`);
+      }
+      // Drop at least the overflowing amount; source selection then deterministically records omissions.
+      contextCharacterBudget = Math.max(0, Math.min(contextCharacterBudget - 1, preview.selection.characterCount - 1, contextCharacterBudget - (input.length - config.groqMaximumInputCharacters)));
+    }
+  };
   const projectAdminAuthorized = (req) => {
     const supplied = req.headers['x-project-context-admin-token'];
     if (!config.projectContextAdminToken || typeof supplied !== 'string') return false;
@@ -44,6 +89,9 @@ export function createApp({ config, recall, store, analysis, contextStore = null
     return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
   };
   const meetingForBot = (botId) => botId ? store.findMeetingByBotId(botId) : null;
+  const meetingForSchedulingKey = (schedulingKey) => typeof store.findMeetingBySchedulingKey === 'function'
+    ? store.findMeetingBySchedulingKey(schedulingKey)
+    : store.dashboard().meetings.find((meeting) => meeting.schedulingKey === schedulingKey) ?? null;
   const setMeetingState = (meeting, state, details = {}) => typeof store.setMeetingState === 'function'
     ? store.setMeetingState(meeting.id, state, details)
     : store.updateMeeting(meeting.id, {
@@ -72,6 +120,19 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       throw error;
     }
   };
+  // The browser receives this preview for review, but it is never trusted as an authority.
+  // Rebuilding it from approved storage prevents a caller from adding arbitrary text and hashing it.
+  const buildLocalRecapPreview = (bundle, question) => {
+    const built = buildContextSelection({
+      ...bundle,
+      meeting: { title: 'Local context recap' },
+      transcript: { utterances: [{ text: question.trim() }] },
+      projectContext: question.trim(),
+      maximumCharacters: config.projectContextMaximumCharacters,
+    });
+    const preview = { ...built.selection, questionSha256: recapQuestionHash(question), contentSha256: built.contentSha256 };
+    return { preview, previewSha256: recapPreviewHash(preview) };
+  };
 
   const requestTranscript = async (recordingId, meeting) => {
     const claimKey = `transcript:${recordingId}`;
@@ -95,6 +156,7 @@ export function createApp({ config, recall, store, analysis, contextStore = null
     }
   };
 
+  // Webhooks can be retried or arrive after reconciliation; a transcript ID gets exactly one local completion attempt.
   const completeTranscript = async ({ transcriptId, recordingId = null, botId = null, artifact = null }) => {
     const claimKey = `transcript-result:${transcriptId}`;
     const existing = store.getTranscript(transcriptId);
@@ -201,7 +263,7 @@ export function createApp({ config, recall, store, analysis, contextStore = null
     const url = new URL(req.url, 'http://local');
     if (req.method === 'GET' && url.pathname === '/') { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(fs.readFileSync(path.join(publicDir, 'index.html'))); }
     if (req.method === 'GET' && url.pathname === '/context-ui-state.js') { res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); return res.end(fs.readFileSync(path.join(publicDir, 'context-ui-state.js'))); }
-    if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(res, 200, { ...store.dashboard(), mockMode: config.mockMode });
+    if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(res, 200, { ...store.dashboard(), mockMode: config.mockMode, manualTranscriptEnabled: config.manualTranscriptEnabled });
     if (req.method === 'GET' && url.pathname === '/api/meetings') return json(res, 200, store.dashboard().meetings);
     if (req.method === 'POST' && url.pathname === '/api/demo/reset') {
       if (!config.mockMode) return json(res, 404, { error: 'Demo reset is available only in mock mode.' });
@@ -218,9 +280,123 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       store.resetMock(mockFixture);
       return json(res, 200, { reset: true, ...store.dashboard(), mockMode: true });
     }
+    if (req.method === 'POST' && (url.pathname === '/api/manual-transcripts/preview' || url.pathname === '/api/manual-meetings')) {
+      if (!config.manualTranscriptEnabled) return json(res, 404, { error: 'Manual transcript import is disabled.' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'Request body must be valid JSON.' }); }
+      try {
+        const parsed = parseManualTranscript(body);
+        if (url.pathname === '/api/manual-transcripts/preview') return json(res, 200, { preview: parsed });
+        const now = new Date().toISOString();
+        const meetingId = crypto.randomUUID();
+        const transcriptId = crypto.randomUUID();
+        const meetingDate = body.meetingDate ? new Date(body.meetingDate).toISOString() : now;
+        const meeting = store.addMeeting({
+          id: meetingId,
+          source: 'manual',
+          sourceMetadata: { inputFormat: parsed.format, createdBy: 'local_user', createdAt: now },
+          recallBotId: null,
+          botId: null,
+          meetingUrl: null,
+          title: body.title.trim(),
+          meetingType: body.meetingType || 'general_technical_sync',
+          joinAt: meetingDate,
+          status: 'completed',
+          statusHistory: [{ eventType: 'app.manual_transcript_created', status: 'completed', code: 'manual_transcript_created', subCode: null, occurredAt: now }],
+          participants: parsed.participants,
+          startedAt: parsed.timestampsAvailable ? meetingDate : null,
+          endedAt: parsed.timestampsAvailable ? meetingDate : null,
+          durationMs: parsed.analytics ? parsed.analytics.meetingDurationSeconds * 1000 : null,
+          transcriptStatus: 'done',
+          processingStatus: 'complete',
+          error: null,
+          isMock: false,
+          createdAt: now,
+          updatedAt: now,
+        });
+        const transcript = store.saveTranscript(transcriptId, {
+          id: transcriptId,
+          meetingId,
+          recordingId: null,
+          source: 'manual',
+          sourceMetadata: { inputFormat: parsed.format, timestampsAvailable: parsed.timestampsAvailable, originalTextSha256: parsed.originalTextSha256, parserVersion: 'manual-transcript/v1' },
+          status: 'done',
+          utterances: parsed.utterances,
+          paragraphs: parsed.utterances,
+          analytics: parsed.analytics,
+          warnings: parsed.warnings,
+          isMock: false,
+          receivedAt: now,
+        });
+        return json(res, 201, { meeting, transcript });
+      } catch (error) {
+        if (error instanceof ManualTranscriptValidationError) return json(res, 422, { error: 'Manual transcript failed validation.', issues: error.issues });
+        throw error;
+      }
+    }
+    const manualMeetingMatch = url.pathname.match(/^\/api\/manual-meetings\/([^/]+)$/);
+    if (req.method === 'DELETE' && manualMeetingMatch) {
+      if (!config.manualTranscriptEnabled) return json(res, 404, { error: 'Manual transcript import is disabled.' });
+      const result = store.deleteManualMeeting?.(decodeURIComponent(manualMeetingMatch[1]));
+      if (!result || result.reason === 'not_manual') return json(res, 404, { error: 'Manual meeting not found.' });
+      if (!result.deleted) return json(res, 409, { error: 'Reviewed manual meetings are retained for audit history.' });
+      return json(res, 200, { deleted: true });
+    }
     if (req.method === 'GET' && url.pathname === '/api/projects') {
       if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
       return json(res, 200, { projects: contextStore.listProjects() });
+    }
+    const localRecapPreviewMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/local-recap-preview$/);
+    if (req.method === 'POST' && localRecapPreviewMatch) {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      const projectId = decodeURIComponent(localRecapPreviewMatch[1]);
+      const bundle = contextStore.getProjectBundle(projectId);
+      if (!bundle) return json(res, 404, { error: 'Project not found.' });
+      if (!bundle.project.isActive) return json(res, 409, { error: 'Project is inactive.' });
+      if (bundle.repositories.some((repository) => repository.localPath) && !projectAdminAuthorized(req)) return json(res, 401, { error: 'A valid project-context admin token is required for local repository recaps.' });
+      const repositoryContextError = localContextError(bundle);
+      if (repositoryContextError) return json(res, 409, { error: repositoryContextError });
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'Request body must be valid JSON.' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Request body must be a JSON object.' });
+      if (Object.keys(body).some((field) => field !== 'question')) return json(res, 400, { error: 'Request body contains unsupported fields.' });
+      if (typeof body.question !== 'string' || !body.question.trim() || body.question.length > 2_000) return json(res, 400, { error: 'question is required and must contain at most 2000 characters.' });
+      return json(res, 200, buildLocalRecapPreview(bundle, body.question));
+    }
+    const localRecapMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/local-recap$/);
+    if (req.method === 'POST' && localRecapMatch) {
+      if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
+      const projectId = decodeURIComponent(localRecapMatch[1]);
+      const bundle = contextStore.getProjectBundle(projectId);
+      if (!bundle) return json(res, 404, { error: 'Project not found.' });
+      if (!bundle.project.isActive) return json(res, 409, { error: 'Project is inactive.' });
+      if (bundle.repositories.some((repository) => repository.localPath) && !projectAdminAuthorized(req)) return json(res, 401, { error: 'A valid project-context admin token is required for local repository recaps.' });
+      const repositoryContextError = localContextError(bundle);
+      if (repositoryContextError) return json(res, 409, { error: repositoryContextError });
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'Request body must be valid JSON.' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Request body must be a JSON object.' });
+      if (Object.keys(body).some((field) => !['question', 'preview', 'previewSha256'].includes(field))) return json(res, 400, { error: 'Request body contains unsupported fields.' });
+      if (typeof body.question !== 'string' || !body.question.trim() || body.question.length > 2_000) return json(res, 400, { error: 'question is required and must contain at most 2000 characters.' });
+      if (!body.preview || typeof body.preview !== 'object' || Array.isArray(body.preview) || typeof body.previewSha256 !== 'string') return json(res, 400, { error: 'A displayed local recap preview and its integrity hash are required.' });
+      const expectedPreview = buildLocalRecapPreview(bundle, body.question);
+      if (body.previewSha256 !== expectedPreview.previewSha256 || recapPreviewHash(body.preview) !== expectedPreview.previewSha256) return json(res, 409, { error: 'The recap question or displayed context preview changed. Create a new preview.' });
+      try {
+        const generated = await analysis.recap({ question: body.question, preview: expectedPreview.preview });
+        const recap = validateLocalRecap(generated.output, expectedPreview.preview);
+        return json(res, 200, { recap, model: generated.model, usage: generated.usage, rateLimit: generated.rateLimit, previewSha256: expectedPreview.previewSha256 });
+      } catch (error) {
+        if (error instanceof GroqRateLimitError) return json(res, 429, { error: 'Groq rate limit reached.', retryAfterSeconds: error.retryAfterSeconds }, { 'Retry-After': String(error.retryAfterSeconds) });
+        if (error instanceof GroqBusyError) return json(res, 429, { error: 'Groq analysis capacity is busy. Try again shortly.' }, { 'Retry-After': '1' });
+        if (error instanceof GroqConfigurationError) return json(res, 503, { error: 'GROQ_API_KEY is not configured.' });
+        if (error instanceof LocalRecapValidationError) return json(res, 422, { error: 'Groq local recap failed validation.', issues: error.issues });
+        if (error instanceof RangeError) return json(res, 422, { error: 'The local recap input exceeds the configured limit.' });
+        logger.error('local-groq-recap-failed', { projectId });
+        return json(res, 502, { error: 'Groq local recap failed.' });
+      }
     }
     if (req.method === 'POST' && url.pathname === '/api/projects/local') {
       if (!contextStore) return json(res, 503, { error: 'Project context is unavailable.' });
@@ -293,6 +469,29 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       if (!inventory.project.isActive) return json(res, 409, { error: 'Project is inactive.' });
       return json(res, 200, inventory);
     }
+    if (req.method === 'GET' && url.pathname === '/api/tickets') {
+      return json(res, 200, { tickets: store.tickets(), ticketEvents: store.dashboard().ticketEvents ?? [] });
+    }
+    const ticketMatch = url.pathname.match(/^\/api\/tickets\/([^/]+)$/);
+    if (req.method === 'GET' && ticketMatch) {
+      const ticket = store.getTicket(decodeURIComponent(ticketMatch[1]));
+      return ticket ? json(res, 200, { ticket, events: store.ticketEventsForTicket(ticket.id) }) : json(res, 404, { error: 'Ticket not found.' });
+    }
+    if (req.method === 'PATCH' && ticketMatch) {
+      const ticket = store.getTicket(decodeURIComponent(ticketMatch[1]));
+      if (!ticket) return json(res, 404, { error: 'Ticket not found.' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'Request body must be valid JSON.' }); }
+      try {
+        const update = store.updateTicket(ticket.id, validateTicketUpdate(body));
+        if (update.conflict) return json(res, 409, { error: 'Ticket changed since it was loaded.', ticket: update.ticket });
+        return json(res, 200, { ticket: update.ticket, events: store.ticketEventsForTicket(ticket.id) });
+      } catch (error) {
+        if (error instanceof TicketValidationError) return json(res, 422, { error: 'Ticket update failed validation.', issues: error.issues });
+        throw error;
+      }
+    }
     const artifactMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)$/);
     if (req.method === 'GET' && artifactMatch) {
       const artifactId = decodeURIComponent(artifactMatch[1]);
@@ -344,6 +543,43 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       const meeting = store.getMeeting(decodeURIComponent(meetingMatch[1]));
       return meeting ? json(res, 200, meeting) : json(res, 404, { error: 'Meeting not found.' });
     }
+    if (req.method === 'PATCH' && meetingMatch) {
+      const meeting = store.getMeeting(decodeURIComponent(meetingMatch[1]));
+      if (!meeting) return json(res, 404, { error: 'Meeting not found.' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'Request body must be valid JSON.' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Request body must be a JSON object.' });
+      // Only the human-facing label is editable here; lifecycle, provider, and evidence fields are not.
+      if (Object.keys(body).some((field) => field !== 'title')) return json(res, 400, { error: 'Only the meeting title can be renamed.' });
+      if (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 200) {
+        return json(res, 400, { error: 'Title is required and must contain at most 200 characters.' });
+      }
+      return json(res, 200, store.updateMeeting(meeting.id, { title: body.title.trim() }));
+    }
+    const meetingTicketMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/tickets$/);
+    if (req.method === 'POST' && meetingTicketMatch) {
+      const meeting = store.getMeeting(decodeURIComponent(meetingTicketMatch[1]));
+      if (!meeting) return json(res, 404, { error: 'Meeting not found.' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'Request body must be valid JSON.' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Request body must be a JSON object.' });
+      if (Object.keys(body).some((field) => !['artifactId', 'artifactVersion'].includes(field))) return json(res, 400, { error: 'Request body contains unsupported fields.' });
+      if (typeof body.artifactId !== 'string' || !body.artifactId || !Number.isInteger(body.artifactVersion) || body.artifactVersion < 1) {
+        return json(res, 400, { error: 'artifactId and a positive integer artifactVersion are required.' });
+      }
+      const artifact = store.getArtifact(body.artifactId);
+      if (!artifact || artifact.meetingId !== meeting.id) return json(res, 404, { error: 'Artifact not found for this meeting.' });
+      if ((artifact.version ?? 1) !== body.artifactVersion) return json(res, 409, { error: 'Artifact changed since it was selected.', artifact });
+      try {
+        const saved = store.createTicket(ticketFromArtifact({ id: crypto.randomUUID(), artifact, meeting }));
+        return json(res, saved.created ? 201 : 200, { ticket: saved.ticket, created: saved.created });
+      } catch (error) {
+        if (error instanceof TicketValidationError) return json(res, 422, { error: 'Ticket creation failed validation.', issues: error.issues });
+        throw error;
+      }
+    }
     const transcriptMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/transcript$/);
     if (req.method === 'GET' && transcriptMatch) {
       const meetingId = decodeURIComponent(transcriptMatch[1]);
@@ -377,7 +613,13 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       const repositoryContextError = localContextError(bundle);
       if (repositoryContextError) return json(res, 409, { error: repositoryContextError });
       const projectContext = body.projectContext?.trim() || null;
-      const preview = buildContextSelection({ ...bundle, meeting, transcript, projectContext, maximumCharacters: config.projectContextMaximumCharacters });
+      let preview;
+      try {
+        preview = boundedMeetingContextPreview({ bundle, meeting, transcript, projectContext });
+      } catch (error) {
+        if (error instanceof RangeError) return json(res, 413, { error: error.message });
+        throw error;
+      }
       const saved = contextStore.saveContextSelection({ meetingId, projectId: bundle.project.id, ...preview });
       return json(res, 201, { contextSelection: saved });
     }
@@ -452,8 +694,16 @@ export function createApp({ config, recall, store, analysis, contextStore = null
         const selectedProject = contextStore.getProject(contextSelection.projectId);
         if (!selectedProject || !selectedProject.isActive) return json(res, 409, { error: 'The selected project is no longer available.' });
         if (!contextStore.contextSelectionUsesCurrentIngestions(contextSelection)) return json(res, 409, { error: 'The approved context snapshot references a superseded repository ingestion. Create and approve a new preview.' });
-        const repositoryContextError = localContextError(contextStore.getProjectBundle(contextSelection.projectId));
+        const bundle = contextStore.getProjectBundle(contextSelection.projectId);
+        const repositoryContextError = localContextError(bundle);
         if (repositoryContextError) return json(res, 409, { error: repositoryContextError });
+      }
+      try {
+        // Reject an oversized input before creating an analysis job or consuming an approved snapshot.
+        buildAnalysisInput({ meeting, transcript, projectContext, contextSelection, maximumCharacters: config.groqMaximumInputCharacters });
+      } catch (error) {
+        if (error instanceof RangeError) return json(res, 413, { error: error.message });
+        throw error;
       }
       const job = store.beginAnalysis(meetingId, contextSelection ? {
         contextSelectionId: contextSelection.id,
@@ -476,11 +726,16 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       }
       if (contextStore) contextStore.beginAnalysisRun({ id: job.id, meetingId, projectId: contextSelection?.projectId ?? null, contextSelectionId: contextSelection?.id ?? null });
       store.updateMeeting(meetingId, { analysisStatus: 'running' });
+      // Retained across the catch so a failure record can say which structured-output mode produced it.
+      let generated = null;
       try {
-        const generated = await analysis.analyze({ meeting, transcript, projectContext, contextSelection });
-        const artifacts = validateAndHydrateArtifacts(generated.output, { meetingId, participants: meeting.participants ?? [], utterances: transcript.utterances, contextSelection });
+        generated = await analysis.analyze({ meeting, transcript, projectContext, contextSelection });
+        // Provider JSON is untrusted: retain only proposals whose schema and evidence resolve against this transcript.
+        const { artifacts, rejected } = validateAndHydrateSupportedArtifacts(generated.output, { meetingId, participants: meeting.participants ?? [], utterances: transcript.utterances, contextSelection });
         const storedArtifacts = store.replaceProposedArtifacts(meetingId, artifacts);
-        const completed = store.finishAnalysis(job.id, { status: 'complete', model: generated.model, usage: generated.usage, rateLimit: generated.rateLimit, artifactCount: storedArtifacts.length });
+        const completed = store.finishAnalysis(job.id, { status: 'complete', model: generated.model, usage: generated.usage, rateLimit: generated.rateLimit, structuredOutputMode: generated.structuredOutputMode, artifactCount: storedArtifacts.length, rejectedArtifacts: rejected });
+        // A partially valid batch still completes; the dropped proposals are reported rather than silently lost.
+        if (rejected.length) logger.error('manual-groq-artifacts-rejected', { meetingId, structuredOutputMode: generated.structuredOutputMode, acceptedCount: storedArtifacts.length, rejected });
         if (contextStore) contextStore.finishAnalysisRun(job.id, { status: 'completed', model: generated.model });
         store.updateMeeting(meetingId, { analysisStatus: 'complete', analysisError: null });
         return json(res, 200, { analysis: completed, artifacts: storedArtifacts });
@@ -489,15 +744,27 @@ export function createApp({ config, recall, store, analysis, contextStore = null
           : error instanceof GroqBusyError ? 'busy'
             : error instanceof GroqConfigurationError ? 'not_configured'
               : error instanceof ArtifactValidationError ? 'invalid_output'
-                : error instanceof RangeError ? 'input_too_large'
-                  : 'provider_failed';
+                : error instanceof GroqTruncatedOutputError ? 'output_truncated'
+                  : error instanceof RangeError ? 'input_too_large'
+                    : 'provider_failed';
         if (contextStore) contextStore.finishAnalysisRun(job.id, { status: 'failed', errorCode: code });
-        store.finishAnalysis(job.id, { status: 'failed', error: { code, issues: error instanceof ArtifactValidationError ? error.issues : undefined } });
+        store.finishAnalysis(job.id, { status: 'failed', structuredOutputMode: generated?.structuredOutputMode ?? error.structuredOutputMode ?? null, error: { code, issues: error instanceof ArtifactValidationError ? error.issues : undefined } });
+        if (contextSelection) contextStore?.releaseContextSelectionFromAnalysis(contextSelection.id, job.id);
         store.updateMeeting(meetingId, { analysisStatus: 'failed', analysisError: { code } });
-        logger.error('manual-groq-analysis-failed', { meetingId, code });
+        logger.error('manual-groq-analysis-failed', {
+          meetingId,
+          code,
+          structuredOutputMode: generated?.structuredOutputMode ?? error.structuredOutputMode ?? null,
+          // Validation issues name fields and IDs only, never transcript or context text.
+          issues: error instanceof ArtifactValidationError ? error.issues : null,
+          providerStatus: error instanceof GroqProviderError ? error.status : null,
+          providerCode: error instanceof GroqProviderError ? error.providerCode : null,
+        });
         if (error instanceof GroqRateLimitError) return json(res, 429, { error: 'Groq rate limit reached.', retryAfterSeconds: error.retryAfterSeconds }, { 'Retry-After': String(error.retryAfterSeconds) });
         if (error instanceof GroqBusyError) return json(res, 429, { error: 'Groq analysis capacity is busy. Try again shortly.' }, { 'Retry-After': '1' });
         if (error instanceof GroqConfigurationError) return json(res, 503, { error: 'GROQ_API_KEY is not configured.' });
+        if (error instanceof GroqTruncatedOutputError) return json(res, 502, { error: 'Groq ran out of completion tokens before finishing its analysis. Raise GROQ_MAX_OUTPUT_TOKENS and retry.' });
+        if (error instanceof GroqProviderError) return json(res, 502, { error: error.message });
         if (error instanceof ArtifactValidationError) return json(res, 422, { error: 'Groq returned artifacts that failed validation.', issues: error.issues });
         if (error instanceof RangeError) return json(res, 413, { error: error.message });
         return json(res, 502, { error: 'Groq analysis failed.' });
@@ -545,14 +812,29 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       const meetingType = body.meetingType || 'general_technical_sync';
       if (!meetingTypes.has(meetingType)) return json(res, 400, { error: 'A supported meeting type is required.' });
       const now = new Date().toISOString();
+      const joinAt = normalizedJoinAt(body.joinAt, new Date(now));
+      if (!joinAt) return json(res, 400, { error: 'joinAt must be a valid ISO 8601 date-time when supplied.' });
+      if (body.joinAt !== undefined && body.joinAt !== null && body.joinAt !== '' && Date.parse(joinAt) < Date.now()) {
+        return json(res, 400, { error: 'joinAt must not be in the past. Omit it to request an immediate join.' });
+      }
+      const meetingUrl = canonicalMeetingUrl(body.meetingUrl);
+      const schedulingKey = directMeetingSchedulingKey({ meetingUrl, joinAt });
+      const duplicate = meetingForSchedulingKey(schedulingKey);
+      if (duplicate) {
+        if (duplicate.status === 'failed' && duplicate.error?.code === 'bot_create_failed') {
+          return json(res, 409, { error: 'A bot request for this meeting instance has an unresolved creation failure. Choose a new meeting time before creating another bot.', meeting: duplicate });
+        }
+        return json(res, 200, { ...duplicate, deduplicated: true });
+      }
       const meeting = store.addMeeting({
         id: crypto.randomUUID(),
         recallBotId: null,
         botId: null,
-        meetingUrl: body.meetingUrl,
+        meetingUrl,
+        schedulingKey,
         title: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : 'Untitled meeting',
         meetingType,
-        joinAt: body.joinAt || now,
+        joinAt,
         status: 'created',
         statusHistory: [{ eventType: 'app.meeting_created', status: 'created', code: 'created', subCode: null, occurredAt: now }],
         participants: [],
@@ -567,7 +849,7 @@ export function createApp({ config, recall, store, analysis, contextStore = null
         updatedAt: now,
       });
       try {
-        const bot = await recall.createBot({ meetingUrl: meeting.meetingUrl, joinAt: meeting.joinAt, intentId: meeting.id });
+        const bot = await recall.createBot({ meetingUrl: meeting.meetingUrl, joinAt: meeting.joinAt, intentId: meeting.id, schedulingKey: meeting.schedulingKey });
         store.updateMeeting(meeting.id, { botId: bot.id, recallBotId: bot.id });
         if (Date.parse(meeting.joinAt) > Date.now() + 1_000) setMeetingState(meeting, 'bot_scheduled', { eventType: 'app.bot_scheduled', code: 'bot_scheduled' });
         return json(res, 201, store.getMeeting(meeting.id));
@@ -583,6 +865,7 @@ export function createApp({ config, recall, store, analysis, contextStore = null
       try { event = JSON.parse(rawBody); }
       catch { return json(res, 400, { error: 'Webhook body must be valid JSON.' }); }
       const eventId = req.headers['webhook-id'] ?? req.headers['svix-id'];
+      // Acknowledge signed deliveries promptly; the persisted claim makes provider retries harmless while work continues off-request.
       if (store.claim(`webhook:${eventId}`)) {
         store.rememberEvent(eventId, { eventId, eventType: event.event ?? event.type ?? 'unknown', recallBotId: event.data?.bot?.id ?? null, receivedAt: new Date().toISOString(), processingStatus: 'accepted' });
         setImmediate(() => processWebhook(event)

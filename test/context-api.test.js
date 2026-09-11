@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/app.js';
 import { createConfig } from '../src/config.js';
 import { ProjectContextStore } from '../src/context-db.js';
+import { buildAnalysisInput } from '../src/groq-client.js';
 import { loadSeedManifest } from '../src/context-seed.js';
 import { mockFixture } from '../src/mock-data.js';
 import { JsonStore } from '../src/store.js';
@@ -72,6 +73,32 @@ test('creates and persists an immutable bounded context preview without external
   assert.equal(association.project_id, 'project-event-platform');
 });
 
+test('reserves Groq input space for a long transcript before a context preview is approved', async (context) => {
+  const fixture = fixtureApp(context, () => ({ model: 'openai/gpt-oss-20b', usage: null, rateLimit: {}, output: { artifacts: [] } }));
+  const longTranscript = {
+    ...mockFixture.transcript,
+    utterances: [{ ...mockFixture.transcript.utterances[0], text: 'event '.repeat(2_800) }],
+  };
+  fixture.store.saveTranscript(mockFixture.transcript.id, longTranscript);
+
+  const previewResponse = await invoke(fixture.app, 'POST', '/api/meetings/mock-architecture-review/context-preview', JSON.stringify({ projectId: 'project-event-platform' }));
+  assert.equal(previewResponse.status, 201);
+  const selection = previewResponse.body.contextSelection;
+  assert.ok(selection.maximumCharacters < 12_000, 'the context budget should shrink for this meeting');
+  const input = buildAnalysisInput({
+    meeting: fixture.store.getMeeting('mock-architecture-review'),
+    transcript: longTranscript,
+    projectContext: null,
+    contextSelection: selection,
+  });
+  assert.ok(input.length <= 18_000);
+
+  assert.equal((await invoke(fixture.app, 'POST', `/api/meetings/mock-architecture-review/context-preview/${selection.id}/approve`)).status, 200);
+  const analysisResponse = await invoke(fixture.app, 'POST', '/api/meetings/mock-architecture-review/analyze', JSON.stringify({ contextSelectionId: selection.id }));
+  assert.equal(analysisResponse.status, 200);
+  assert.equal(fixture.calls().analysisCalls, 1);
+});
+
 test('context preview validates meetings, transcripts, projects, and request fields', async (context) => {
   const { app, contextStore, store } = fixtureApp(context);
   assert.equal((await invoke(app, 'POST', '/api/meetings/missing/context-preview', JSON.stringify({ projectId: 'project-event-platform' }))).status, 404);
@@ -125,6 +152,17 @@ test('binds one verified preview to one explicit manual analysis and hydrates co
   const reused = await invoke(fixture.app, 'POST', '/api/meetings/mock-architecture-review/analyze', JSON.stringify({ contextSelectionId: selection.id, projectContext: notes }));
   assert.equal(reused.status, 409);
   assert.equal(fixture.calls().analysisCalls, 1);
+});
+
+test('retains an approved context preview when Groq analysis fails so an explicit retry can reuse it', async (context) => {
+  const fixture = fixtureApp(context, () => { throw new Error('Provider unavailable'); });
+  const previewResponse = await invoke(fixture.app, 'POST', '/api/meetings/mock-architecture-review/context-preview', JSON.stringify({ projectId: 'project-event-platform' }));
+  const selection = previewResponse.body.contextSelection;
+  assert.equal((await invoke(fixture.app, 'POST', `/api/meetings/mock-architecture-review/context-preview/${selection.id}/approve`)).status, 200);
+  const analysisResponse = await invoke(fixture.app, 'POST', '/api/meetings/mock-architecture-review/analyze', JSON.stringify({ contextSelectionId: selection.id }));
+  assert.equal(analysisResponse.status, 502);
+  assert.equal(fixture.contextStore.getContextSelection(selection.id).analysisId, null);
+  assert.notEqual(fixture.contextStore.getContextSelection(selection.id).approvedAt, null);
 });
 
 test('rejects changed notes, cross-meeting previews, unavailable projects, and arbitrary context input before Groq', async (context) => {

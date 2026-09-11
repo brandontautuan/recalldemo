@@ -1,3 +1,4 @@
+/** Maps Recall's extensible provider events into a small, forward-only application state machine. */
 export const canonicalMeetingStates = Object.freeze([
   'created',
   'bot_scheduled',

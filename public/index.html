@@ -9,8 +9,10 @@
   header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
   .mode-controls { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; justify-content: end; }
   .mode-controls button { margin: 0; padding: .45rem .65rem; background: #42526d; }
+  #recall-workflow-toggle { background: #42526d; }
+  body.local-recap-mode #meeting-launch, body.local-recap-mode #manual-transcript-section, body.local-recap-mode #dashboard { display: none; }
   h1, h2, h3, p { margin-top: 0; }
-  section, article { background: white; border: 1px solid #dfe5ef; border-radius: .75rem; padding: 1.25rem; margin: 1rem 0; }
+  section, article, .transcript-panel { background: white; border: 1px solid #dfe5ef; border-radius: .75rem; padding: 1.25rem; margin: 1rem 0; }
   label { display: block; font-weight: 650; margin: .75rem 0; }
   input, select, textarea, button { box-sizing: border-box; width: 100%; font: inherit; padding: .7rem; margin-top: .3rem; }
   button { width: auto; border: 0; border-radius: .4rem; background: #2459d3; color: white; font-weight: 700; cursor: pointer; }
@@ -20,7 +22,21 @@
   .metric { background: #f7f9fd; border-radius: .5rem; padding: .75rem; }
   .metric strong { display: block; font-size: 1.25rem; }
   .history { padding-left: 1.25rem; }
+  .meeting-title-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .5rem; }
+  .meeting-title-row h2 { margin: 0; }
+  .title-action { padding: .35rem .6rem; font-size: .85rem; background: #42526d; }
+  .title-action.secondary { background: transparent; color: #61708a; border: 1px solid #dfe5ef; }
+  .title-input { width: auto; flex: 1 1 20rem; margin: 0; font-size: 1.2rem; font-weight: 700; }
   .turn { border-left: 3px solid #2459d3; padding-left: .75rem; margin: 1rem 0; }
+  .transcript-panel > summary { cursor: pointer; list-style: none; }
+  .transcript-panel > summary::-webkit-details-marker { display: none; }
+  .transcript-panel > summary::before { content: '▸'; display: inline-block; width: 1rem; color: #2459d3; font-weight: 700; }
+  .transcript-panel[open] > summary::before { content: '▾'; }
+  .transcript-panel > summary h3 { display: inline; margin: 0; }
+  .transcript-panel > summary:hover h3 { color: #2459d3; }
+  .transcript-panel > summary .muted { margin-left: .5rem; font-size: .9rem; }
+  .transcript-turns { max-height: 30rem; overflow-y: auto; margin-top: .75rem; padding-right: .5rem; border-top: 1px solid #dfe5ef; }
+  .transcript-turns .turn:first-child { margin-top: .75rem; }
   .artifact { border-left: 3px solid #8d55c7; padding-left: .9rem; margin: 1rem 0; }
   .artifact-controls, .evidence-list { display: flex; gap: .5rem; flex-wrap: wrap; margin: .5rem 0; }
   .artifact-controls button, .evidence-list button { font-size: .9rem; padding: .45rem .65rem; }
@@ -47,15 +63,65 @@
   .scan-preview { border: 1px solid #b9c8e6; border-radius: .5rem; padding: .9rem; margin-top: .75rem; }
   .scan-preview pre { white-space: pre-wrap; max-height: 16rem; overflow: auto; background: #f7f9fd; padding: .65rem; }
   .artifact h4 { margin-bottom: .35rem; }
-  @media (max-width: 700px) { .context-controls { grid-template-columns: 1fr; } }
+  .app-tabs { display: flex; gap: .5rem; margin: 1.5rem 0 .5rem; border-bottom: 1px solid #dfe5ef; }
+  .app-tab { border-radius: .5rem .5rem 0 0; background: transparent; color: #385072; padding: .65rem .9rem; }
+  .app-tab[aria-selected="true"] { background: #e8eefc; color: #173b92; }
+  .ticket-workspace { background: linear-gradient(135deg, #f2f8f6, #fff); }
+  .ticket-heading { display: flex; gap: .85rem; align-items: flex-start; }
+  .ticket-mark { flex: 0 0 auto; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: .75rem; color: white; background: #2b7a67; font-weight: 800; }
+  .ticket-filters { display: grid; grid-template-columns: 1fr 1fr 2fr; gap: .75rem; margin: 1rem 0; }
+  .ticket-filters label { margin: 0; }
+  .ticket-card { border-left: 4px solid #2b7a67; }
+  .ticket-meta { display: flex; flex-wrap: wrap; gap: .45rem; margin: .65rem 0; }
+  .ticket-card details { margin-top: .75rem; }
+  #local-recap-workspace { border: 0; border-radius: 1rem; background: linear-gradient(135deg, #edf4ff, #f7f9fd); box-shadow: 0 12px 32px rgba(36, 89, 211, .09); }
+  .recap-heading { display: flex; gap: .85rem; align-items: flex-start; }
+  .recap-heading h2 { margin-bottom: .25rem; }
+  .recap-mark { flex: 0 0 auto; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: .75rem; color: white; background: #2459d3; font-weight: 800; }
+  .recap-steps { display: flex; gap: .5rem; flex-wrap: wrap; margin: 1rem 0; }
+  .recap-step { padding: .35rem .6rem; border-radius: 999px; color: #385072; background: white; border: 1px solid #cbd8ed; font-size: .86rem; font-weight: 700; }
+  .recap-form { display: grid; grid-template-columns: 1fr; gap: .85rem; max-width: 50rem; }
+  .recap-form label { margin: 0; }
+  .recap-form textarea { min-height: 7rem; resize: vertical; }
+  .recap-actions { margin-top: 1rem; }
+  .recap-actions button { min-width: 10rem; }
+  #local-recap-preview, #local-recap-result { max-width: 56rem; }
+  #local-recap-result .context-preview { border-color: #67b69f; background: #f1faf7; }
+  #local-recap-status { min-height: 1.5rem; margin: .75rem 0 0; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    :root { color-scheme: dark; color: #eef3fb; background: #101827; }
+    body { background: #101827; }
+    section, article, .context-preview, .transcript-panel { background: #182335; border-color: #30425f; }
+    .transcript-turns { border-color: #30425f; }
+    .title-action.secondary { color: #b5c2d7; border-color: #30425f; }
+    .transcript-panel > summary::before, .transcript-panel > summary:hover h3 { color: #7fa6ff; }
+    .muted, small { color: #b5c2d7; }
+    input, select, textarea { color: #f5f8ff; background: #101827; border: 1px solid #516585; }
+    .context-workspace, .metric, .editor, .export-panel, .context-source pre, .scan-preview pre { background: #121d2d; }
+    #local-recap-workspace { background: linear-gradient(135deg, #172a49, #182335); box-shadow: none; }
+    .ticket-workspace { background: linear-gradient(135deg, #153b35, #182335); }
+    .app-tabs { border-color: #30425f; }
+    .app-tab { color: #b5c2d7; }
+    .app-tab[aria-selected="true"] { background: #203657; color: #eef3fb; }
+    .recap-step { color: #d9e7ff; background: #203657; border-color: #49698f; }
+    #local-recap-result .context-preview { background: #16362f; border-color: #3d927c; }
+  }
+  @media (max-width: 760px) { .context-controls { grid-template-columns: 1fr; } body { padding: 1rem .75rem 3rem; } }
 </style>
 <body>
   <header>
     <div><h1>Engineering Decision Pipeline</h1><p>Capture a technical meeting with Recall and preserve the evidence behind every follow-up.</p></div>
-    <div class="mode-controls"><span id="mode"></span><button id="reset-demo" type="button" hidden>Reset demo</button></div>
+    <div class="mode-controls"><span id="mode"></span><button id="recall-workflow-toggle" type="button">Show meeting workflow</button><button id="reset-demo" type="button" hidden>Reset demo</button></div>
   </header>
 
-  <section>
+  <nav class="app-tabs" aria-label="Workspace views">
+    <button class="app-tab" id="meetings-tab-button" type="button" aria-selected="true">Meetings</button>
+    <button class="app-tab" id="tickets-tab-button" type="button" aria-selected="false">Tickets</button>
+  </nav>
+
+  <div id="meetings-tab">
+
+  <section id="meeting-launch">
     <h2>Launch a meeting bot</h2>
     <form id="meeting-form">
       <label>Meeting URL<input name="meetingUrl" type="url" required placeholder="https://meet.google.com/..." autocomplete="off"></label>
@@ -76,9 +142,45 @@
     <p id="form-result" role="status"></p>
   </section>
 
+  <section id="manual-transcript-section" hidden>
+    <h2>Create a manual transcript</h2>
+    <p class="muted">Paste text or load the sample to test the local analysis workflow. This does not contact Recall or Groq until you later confirm analysis.</p>
+    <form id="manual-transcript-form">
+      <div class="grid">
+        <label>Meeting title<input name="title" required maxlength="200" placeholder="Architecture review notes"></label>
+        <label>Meeting type
+          <select name="meetingType">
+            <option value="architecture_review">Architecture review</option>
+            <option value="sprint_planning">Sprint planning</option>
+            <option value="incident_review">Incident review</option>
+            <option value="bug_triage">Bug triage</option>
+            <option value="general_technical_sync" selected>General technical sync</option>
+          </select>
+        </label>
+        <label>Meeting date (optional)<input name="meetingDate" type="datetime-local"></label>
+      </div>
+      <label>Transcript format
+        <select name="format" id="manual-format">
+          <option value="timestamped_speaker_lines">Timestamped speaker lines</option>
+          <option value="speaker_lines">Speaker lines</option>
+          <option value="plain_paragraphs">Plain paragraphs</option>
+        </select>
+      </label>
+      <label id="manual-default-speaker" hidden>Default speaker<input name="defaultSpeaker" maxlength="100" placeholder="Unknown speaker"></label>
+      <label>Transcript text<textarea name="text" required rows="10" maxlength="100000" placeholder="[00:00] Maya: We need one canonical event model.\n[00:12] Jon: I agree."></textarea></label>
+      <div class="artifact-controls">
+        <button id="load-manual-sample" type="button">Load sample transcript</button>
+        <button id="preview-manual-transcript" type="button">Preview parsed transcript</button>
+        <button id="create-manual-meeting" type="submit" disabled>Create manual meeting</button>
+      </div>
+    </form>
+    <p id="manual-transcript-result" role="status"></p>
+    <div id="manual-transcript-preview"></div>
+  </section>
+
   <section>
-    <h2>Approved local project context</h2>
-    <p class="muted">The backend reads only listed documentation files inside server-approved repository roots. Groq never receives a filesystem path or live repository access.</p>
+    <h2>One-time repository setup</h2>
+    <p class="muted">Only use this form to add a new repository or change its approved documentation. Existing approved projects do not need to be configured again.</p>
     <form id="project-form">
       <label>Project-context admin token<input id="project-admin-token" type="password" required autocomplete="off"></label>
       <div class="grid">
@@ -98,7 +200,27 @@
     <div id="scan-preview"></div>
   </section>
 
+  <section id="local-recap-workspace">
+    <div class="recap-heading"><span class="recap-mark">AI</span><div><h2>Ask your repository</h2><p class="muted">Get a cited answer from the documentation you explicitly approved. It does not read arbitrary files, and no meeting transcript is needed.</p></div></div>
+    <div class="recap-steps"><span class="recap-step">1. Choose a project</span><span class="recap-step">2. Review sources</span><span class="recap-step">3. Ask Groq</span></div>
+    <div class="recap-form">
+      <label>Admin token <small>(required after a page refresh; this is not a project setup form)</small><input id="recap-admin-token" type="password" autocomplete="off" placeholder="Enter the token from .env"></label>
+      <label>Approved project<select id="local-recap-project"><option value="">Select a project</option></select></label>
+      <label>Question<textarea id="local-recap-question" rows="3" maxlength="2000" placeholder="What does this project say about retries and the open work?" disabled></textarea></label>
+    </div>
+    <div class="artifact-controls recap-actions">
+      <button id="preview-local-recap" type="button" disabled>1. Preview sources</button>
+      <button id="run-local-recap" type="button" disabled>Ask Groq for recap</button>
+    </div>
+    <p id="local-recap-status" class="muted" role="status"></p>
+    <div id="local-recap-preview"></div>
+    <div id="local-recap-result"></div>
+  </section>
+
   <main id="dashboard"><p>Loading meetings…</p></main>
+  </div>
+
+  <main id="tickets-tab" hidden aria-labelledby="tickets-heading"></main>
 
 <script type="module">
   import {
@@ -129,10 +251,33 @@
     open_question: [['question', 'Question'], ['suggestedOwner', 'Suggested owner']],
   };
   const meetingContextStates = new Map();
+  const manualSample = `[00:00] Maya: We need one canonical event model before the ingestion service adds another source.
+[00:10.200] Jon: I agree. Normalize provider events at the boundary and keep the application model provider-neutral.
+[00:23] Maya: Decision: use the normalized event envelope. Jon will document the migration by Friday.`;
+  let manualPreviewFingerprint = null;
   let selectableProjects = [];
   let projectsLoaded = false;
   let projectLoadError = null;
-  const projectAdminHeaders = (extra = {}) => ({ ...extra, 'x-project-context-admin-token': document.querySelector('#project-admin-token').value });
+  let recallWorkflowVisible = false;
+  let dashboardState = null;
+  let activeWorkspaceTab = 'meetings';
+  // The dashboard poll replaces every card, so an expanded transcript is remembered by meeting ID
+  // rather than left to the DOM, which would otherwise snap shut every five seconds.
+  const expandedTranscripts = new Set();
+  // Meetings whose analysis this page session started, so stored results from earlier sessions
+  // are not replayed as fresh status on load.
+  const analysisRequestedHere = new Set();
+  // Analysis IDs already reported to the console, so the five-second poll logs each failure once.
+  const loggedAnalysisFailures = new Set();
+  // Meeting ID -> in-progress title draft, so a rename survives the poll that rebuilds every card.
+  const renamingMeetings = new Map();
+  const projectAdminToken = () => document.querySelector('#recap-admin-token')?.value || document.querySelector('#project-admin-token').value;
+  const projectAdminHeaders = (extra = {}) => ({ ...extra, 'x-project-context-admin-token': projectAdminToken() });
+
+  function syncWorkflowVisibility() {
+    document.body.classList.toggle('local-recap-mode', !recallWorkflowVisible);
+    document.querySelector('#recall-workflow-toggle').textContent = recallWorkflowVisible ? 'Hide meeting workflow' : 'Show meeting workflow';
+  }
 
   function refreshProjectScanPicker() {
     const picker = document.querySelector('#scan-project');
@@ -142,6 +287,89 @@
       picker.append(Object.assign(node('option', `${project.name} — ${project.localRepositories[0].name}`), { value: project.id }));
     }
     picker.value = selectableProjects.some((item) => item.id === selected) ? selected : '';
+  }
+
+  let localRecapPreview = null;
+  let localRecapError = null;
+  function refreshLocalRecapPicker() {
+    const picker = document.querySelector('#local-recap-project');
+    const selected = picker.value;
+    picker.replaceChildren(Object.assign(node('option', 'Select a project'), { value: '' }));
+    for (const project of selectableProjects) picker.append(Object.assign(node('option', project.name), { value: project.id }));
+    picker.value = selectableProjects.some((project) => project.id === selected) ? selected : '';
+  }
+
+  function renderLocalRecapResult(recap) {
+    const host = document.querySelector('#local-recap-result');
+    const panel = node('div', undefined, 'context-preview');
+    panel.append(node('h3', 'Groq recap'), node('p', recap.answer));
+    const citations = node('ul');
+    for (const citation of recap.citations) {
+      const location = citation.sourcePath ? ` · ${citation.sourcePath}${citation.lineStart ? `:${citation.lineStart}-${citation.lineEnd}` : ''}` : '';
+      citations.append(node('li', `${citation.label}${location}: ${citation.claim}`));
+    }
+    panel.append(node('strong', 'Source citations'), citations);
+    host.replaceChildren(panel);
+  }
+
+  function setupLocalRecapWorkspace() {
+    const project = document.querySelector('#local-recap-project');
+    const adminToken = document.querySelector('#recap-admin-token');
+    const question = document.querySelector('#local-recap-question');
+    const previewButton = document.querySelector('#preview-local-recap');
+    const recapButton = document.querySelector('#run-local-recap');
+    const status = document.querySelector('#local-recap-status');
+    const previewHost = document.querySelector('#local-recap-preview');
+    const sync = () => {
+      const ready = Boolean(adminToken.value && project.value && question.value.trim());
+      question.disabled = !project.value;
+      previewButton.disabled = !ready;
+      const previewCurrent = localRecapPreview && localRecapPreview.question === question.value.trim() && localRecapPreview.projectId === project.value;
+      recapButton.hidden = !previewCurrent;
+      recapButton.disabled = !previewCurrent;
+      if (localRecapError) { status.className = 'error'; status.textContent = localRecapError; }
+      else if (previewCurrent) { status.className = 'muted'; status.textContent = `Step 2: review the ${localRecapPreview.preview.sources.length} displayed sources, then ask Groq.`; }
+      else { status.className = 'muted'; status.textContent = adminToken.value ? 'Step 1: preview the exact local sources before Groq can be used.' : 'Enter the admin token here, then preview sources.'; }
+    };
+    project.onchange = () => { localRecapPreview = null; localRecapError = null; previewHost.replaceChildren(); document.querySelector('#local-recap-result').replaceChildren(); sync(); };
+    adminToken.oninput = () => { localRecapPreview = null; localRecapError = null; previewHost.replaceChildren(); sync(); };
+    question.oninput = () => { localRecapPreview = null; localRecapError = null; previewHost.replaceChildren(); sync(); };
+    previewButton.onclick = async () => {
+      localRecapPreview = null;
+      localRecapError = null;
+      previewButton.disabled = true;
+      status.textContent = 'Building bounded source preview…';
+      try {
+        const response = await fetch(`/api/projects/${encodeURIComponent(project.value)}/local-recap-preview`, { method: 'POST', headers: projectAdminHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ question: question.value.trim() }) });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error ?? 'Local recap preview failed.');
+        localRecapPreview = { projectId: project.value, question: question.value.trim(), preview: body.preview, previewSha256: body.previewSha256 };
+        previewHost.replaceChildren(renderContextPreview(body.preview));
+        previewHost.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } catch (error) { localRecapError = error.message; }
+      sync();
+    };
+    recapButton.onclick = async () => {
+      if (!localRecapPreview) { localRecapError = 'Preview sources before asking Groq for a recap.'; sync(); return; }
+      if (!window.confirm(`Send the displayed ${localRecapPreview.preview.sources.length} local context sources and your question to Groq?`)) return;
+      recapButton.disabled = true;
+      recapButton.textContent = 'Asking Groq…';
+      status.className = 'muted';
+      status.setAttribute('aria-busy', 'true');
+      status.textContent = 'Groq is preparing the cited recap…';
+      try {
+        const response = await fetch(`/api/projects/${encodeURIComponent(project.value)}/local-recap`, { method: 'POST', headers: projectAdminHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ question: localRecapPreview.question, preview: localRecapPreview.preview, previewSha256: localRecapPreview.previewSha256 }) });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error ?? 'Groq local recap failed.');
+        renderLocalRecapResult(body.recap);
+        status.textContent = `Groq recap complete (${body.recap.citations.length} cited claims).`;
+      } catch (error) { localRecapError = error.message; }
+      status.removeAttribute('aria-busy');
+      recapButton.textContent = 'Ask Groq for recap';
+      sync();
+    };
+    refreshLocalRecapPicker();
+    sync();
   }
 
   function renderIngestionPreview(ingestion) {
@@ -170,6 +398,43 @@
     host.replaceChildren(panel);
   }
 
+  function manualTranscriptPayload() {
+    const form = new FormData(document.querySelector('#manual-transcript-form'));
+    return {
+      title: form.get('title'),
+      meetingType: form.get('meetingType'),
+      meetingDate: form.get('meetingDate') ? new Date(form.get('meetingDate')).toISOString() : undefined,
+      format: form.get('format'),
+      defaultSpeaker: form.get('defaultSpeaker') || undefined,
+      text: form.get('text'),
+    };
+  }
+
+  function manualPayloadFingerprint(payload) { return JSON.stringify(payload); }
+
+  function renderManualPreview(preview) {
+    const host = document.querySelector('#manual-transcript-preview');
+    const panel = node('div', undefined, 'scan-preview');
+    panel.append(node('h3', 'Parsed transcript preview'), node('p', `${preview.utterances.length} utterances · ${preview.participants.length} participants · ${preview.timestampsAvailable ? 'timestamps available' : 'timestamps unavailable'}`, 'muted'));
+    for (const warning of preview.warnings ?? []) panel.append(node('p', warning, 'muted'));
+    // Open by default because the user just asked to see it, but collapsible and height-capped.
+    const parsed = node('details', undefined, 'transcript-panel');
+    parsed.open = true;
+    const summary = node('summary');
+    summary.append(node('h3', 'Parsed utterances'), node('span', `${preview.utterances.length} ${preview.utterances.length === 1 ? 'utterance' : 'utterances'}`, 'muted'));
+    parsed.append(summary);
+    const turns = node('div', undefined, 'transcript-turns');
+    for (const utterance of preview.utterances) turns.append(node('p', `${utterance.speakerName}${utterance.startTimestamp?.relative !== undefined ? ` at ${seconds(utterance.startTimestamp.relative)}` : ''}: ${utterance.text}`));
+    parsed.append(turns);
+    panel.append(parsed);
+    host.replaceChildren(panel);
+  }
+
+  function invalidateManualPreview() {
+    manualPreviewFingerprint = null;
+    document.querySelector('#create-manual-meeting').disabled = true;
+  }
+
   const displayValue = (value) => Array.isArray(value)
     ? value.map((item) => typeof item === 'string' ? item : item.path ? `${item.path}${item.lineStart ? `:${item.lineStart}-${item.lineEnd}` : ''}` : `${item.alternative}: ${item.reason}`).join('; ')
     : value;
@@ -179,6 +444,12 @@
     if (!target) {
       document.querySelector('#form-result').textContent = 'The source transcript utterance is unavailable.';
       return;
+    }
+    // Evidence may sit inside a collapsed transcript; open it first or the jump scrolls to nothing.
+    const panel = target.closest('.transcript-panel');
+    if (panel && !panel.open) {
+      panel.open = true;
+      if (panel.dataset.meetingId) expandedTranscripts.add(panel.dataset.meetingId);
     }
     target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     target.classList.add('highlight');
@@ -192,6 +463,158 @@
     const responseBody = await response.json();
     document.querySelector('#form-result').textContent = response.ok ? `${readable(action)} complete.` : `${responseBody.error}${responseBody.issues?.length ? ` ${responseBody.issues.join('; ')}` : ''}`;
     await loadDashboard();
+  }
+
+  async function createLocalTicket(meeting, artifact) {
+    const response = await fetch(`/api/meetings/${encodeURIComponent(meeting.id)}/tickets`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ artifactId: artifact.id, artifactVersion: artifact.version ?? 1 }),
+    });
+    const responseBody = await response.json();
+    document.querySelector('#form-result').textContent = response.ok
+      ? responseBody.created ? 'Local ticket created.' : 'A local ticket already exists for this approved artifact version.'
+      : `${responseBody.error}${responseBody.issues?.length ? ` ${responseBody.issues.join('; ')}` : ''}`;
+    if (response.ok) {
+      activeWorkspaceTab = 'tickets';
+      await loadDashboard();
+    }
+  }
+
+  function setWorkspaceTab(tab) {
+    activeWorkspaceTab = tab;
+    document.querySelector('#meetings-tab').hidden = tab !== 'meetings';
+    document.querySelector('#tickets-tab').hidden = tab !== 'tickets';
+    document.querySelector('#meetings-tab-button').setAttribute('aria-selected', String(tab === 'meetings'));
+    document.querySelector('#tickets-tab-button').setAttribute('aria-selected', String(tab === 'tickets'));
+    if (tab === 'tickets') renderTickets();
+  }
+
+  function ticketEditor(ticket, host) {
+    host.querySelector('.editor')?.remove();
+    const form = node('form', undefined, 'editor');
+    const status = document.createElement('select');
+    for (const value of ['open', 'in_progress', 'blocked', 'done']) {
+      const option = node('option', readable(value));
+      option.value = value;
+      option.selected = ticket.status === value;
+      status.append(option);
+    }
+    const priority = document.createElement('select');
+    for (const value of ['', 'low', 'medium', 'high', 'critical']) {
+      const option = node('option', value ? readable(value) : 'Not specified');
+      option.value = value;
+      option.selected = (ticket.priority ?? '') === value;
+      priority.append(option);
+    }
+    const owner = document.createElement('input');
+    owner.maxLength = 100;
+    owner.value = ticket.owner ?? '';
+    const notes = document.createElement('textarea');
+    notes.maxLength = 5000;
+    notes.rows = 4;
+    notes.value = ticket.notes ?? '';
+    const statusLabel = node('label', 'Status');
+    statusLabel.append(status);
+    const priorityLabel = node('label', 'Priority');
+    priorityLabel.append(priority);
+    const ownerLabel = node('label', 'Owner');
+    ownerLabel.append(owner);
+    const notesLabel = node('label', 'Local notes');
+    notesLabel.append(notes);
+    form.append(statusLabel, priorityLabel, ownerLabel, notesLabel);
+    const controls = node('div', undefined, 'artifact-controls');
+    const save = node('button', 'Save ticket');
+    save.type = 'submit';
+    const cancel = node('button', 'Cancel');
+    cancel.type = 'button';
+    cancel.onclick = () => form.remove();
+    controls.append(save, cancel);
+    form.append(controls);
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const response = await fetch(`/api/tickets/${encodeURIComponent(ticket.id)}`, {
+        method: 'PATCH', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ expectedVersion: ticket.version, status: status.value, priority: priority.value || null, owner: owner.value || null, notes: notes.value || null }),
+      });
+      const responseBody = await response.json();
+      document.querySelector('#form-result').textContent = response.ok ? 'Local ticket updated.' : responseBody.error;
+      if (response.ok) await loadDashboard();
+    };
+    host.append(form);
+  }
+
+  function renderTickets() {
+    const workspace = document.querySelector('#tickets-tab');
+    const previousStatus = workspace.querySelector('[name="ticketStatus"]')?.value ?? '';
+    const previousType = workspace.querySelector('[name="ticketType"]')?.value ?? '';
+    const previousSearch = workspace.querySelector('[name="ticketSearch"]')?.value ?? '';
+    workspace.replaceChildren();
+    const heading = node('section', undefined, 'ticket-workspace');
+    const headingContent = node('div', undefined, 'ticket-heading');
+    headingContent.append(node('span', '✓', 'ticket-mark'));
+    const copy = node('div');
+    copy.append(node('h2', 'Local tickets'));
+    copy.append(node('p', 'Create tickets only from approved action items and bugs. Each ticket preserves its source artifact version, evidence, and context provenance for a future explicit Notion export.', 'muted'));
+    headingContent.append(copy);
+    heading.append(headingContent);
+    const filters = node('div', undefined, 'ticket-filters');
+    const statusLabel = node('label', 'Status');
+    const status = document.createElement('select');
+    status.name = 'ticketStatus';
+    for (const value of ['', 'open', 'in_progress', 'blocked', 'done']) status.append(Object.assign(node('option', value ? readable(value) : 'All statuses'), { value }));
+    status.value = previousStatus;
+    statusLabel.append(status);
+    const typeLabel = node('label', 'Type');
+    const type = document.createElement('select');
+    type.name = 'ticketType';
+    for (const value of ['', 'action_item', 'bug_report']) type.append(Object.assign(node('option', value ? readable(value) : 'All ticket types'), { value }));
+    type.value = previousType;
+    typeLabel.append(type);
+    const searchLabel = node('label', 'Search');
+    const search = document.createElement('input');
+    search.name = 'ticketSearch';
+    search.placeholder = 'Search title, owner, or meeting';
+    search.value = previousSearch;
+    searchLabel.append(search);
+    filters.append(statusLabel, typeLabel, searchLabel);
+    heading.append(filters);
+    workspace.append(heading);
+    const list = node('div');
+    const draw = () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      const tickets = (dashboardState?.tickets ?? []).filter((ticket) => (!status.value || ticket.status === status.value)
+        && (!type.value || ticket.type === type.value)
+        && (!query || [ticket.title, ticket.owner, ticket.meetingTitle].filter(Boolean).some((value) => value.toLocaleLowerCase().includes(query))));
+      list.replaceChildren();
+      if (!tickets.length) list.append(node('p', 'No local tickets match these filters.', 'muted'));
+      for (const ticket of tickets) {
+        const card = node('article', undefined, 'ticket-card');
+        card.append(node('h3', ticket.title));
+        const meta = node('div', undefined, 'ticket-meta');
+        for (const value of [ticket.status, ticket.type, ticket.priority ?? 'no priority']) meta.append(node('span', readable(value), 'badge'));
+        card.append(meta);
+        if (ticket.description) card.append(node('p', ticket.description));
+        card.append(node('p', `Owner: ${ticket.owner ?? 'Unassigned'} · Meeting: ${ticket.meetingTitle}`, 'muted'));
+        if (ticket.notes) card.append(node('p', `Local notes: ${ticket.notes}`));
+        const controls = node('div', undefined, 'artifact-controls');
+        const edit = node('button', 'Update ticket');
+        edit.type = 'button';
+        edit.onclick = () => ticketEditor(ticket, card);
+        controls.append(edit);
+        card.append(controls);
+        const details = node('details');
+        details.append(node('summary', `Source evidence · artifact version ${ticket.sourceArtifactVersion}`));
+        for (const evidence of ticket.evidence ?? []) details.append(node('p', `${evidence.speaker ?? 'Unknown speaker'} at ${Number.isFinite(evidence.startTime) ? seconds(evidence.startTime) : 'time unavailable'}: ${evidence.text}`));
+        card.append(details);
+        list.append(card);
+      }
+    };
+    status.onchange = draw;
+    type.onchange = draw;
+    search.oninput = draw;
+    workspace.append(list);
+    draw();
   }
 
   function artifactEditor(artifact, host) {
@@ -354,8 +777,8 @@
     const panel = node('div', undefined, 'context-preview');
     panel.append(
       node('h4', 'Context preview — no Groq request made'),
-      node('p', `${preview.project.name} · ${preview.characterCount} of ${preview.maximumCharacters} characters selected`, 'muted'),
-      node('p', 'Only this displayed snapshot, the normalized transcript, and your notes will be sent after confirmation.'),
+      node('p', `${preview.project.name} · ${preview.characterCount} of ${preview.maximumCharacters} repository-context characters selected`, 'muted'),
+      node('p', 'This budget reserves space for the normalized transcript and your notes. Only this displayed snapshot, the transcript, and your notes will be sent after confirmation.'),
     );
     panel.append(node('strong', `Included sources (${preview.sources.length})`));
     for (const source of preview.sources) {
@@ -494,6 +917,7 @@
         ? `Send the normalized transcript, your notes, and ${state.preview.sources.length} displayed sources from ${selectedProject.name} to Groq?`
         : 'Send the normalized transcript and your supplied notes to Groq?';
       if (!window.confirm(disclosure)) return;
+      analysisRequestedHere.add(meeting.id);
       saveState({ ...state, busy: 'analysis', error: null });
       sync();
       try {
@@ -503,13 +927,18 @@
           body: JSON.stringify(payload),
         });
         const responseBody = await response.json();
-        if (!response.ok) throw new Error(responseBody.error ?? 'Groq analysis failed.');
+        if (!response.ok) {
+          const error = new Error(responseBody.error ?? 'Groq analysis failed.');
+          error.status = response.status;
+          throw error;
+        }
         saveState({ ...state, busy: null, preview: null, previewProjectContext: null, error: null });
         document.querySelector('#form-result').textContent = 'Manual Groq analysis complete.';
         await loadDashboard();
       } catch (error) {
-        const retryAdvice = state.projectId ? ' Create a new preview before retrying.' : '';
-        saveState({ ...state, busy: null, preview: null, previewProjectContext: null, error: `${error.message}${retryAdvice}` });
+        const previewMustBeRecreated = error.status === 409;
+        const retryAdvice = previewMustBeRecreated ? ' Create a new preview before retrying.' : '';
+        saveState({ ...state, busy: null, preview: previewMustBeRecreated ? null : state.preview, previewProjectContext: previewMustBeRecreated ? null : state.previewProjectContext, error: `${error.message}${retryAdvice}` });
         sync();
       }
     };
@@ -523,11 +952,84 @@
     return workspace;
   }
 
-  function renderMeeting(meeting, transcript, artifacts, analysis, reviewEvents) {
+  // The title row repaints itself in place rather than reloading the dashboard, and the in-progress
+  // draft lives in renamingMeetings so the five-second poll cannot discard what is being typed.
+  function renderMeetingTitle(meeting) {
+    const row = node('div', undefined, 'meeting-title-row');
+    const paint = () => {
+      row.replaceChildren();
+      if (!renamingMeetings.has(meeting.id)) {
+        const rename = node('button', 'Rename', 'title-action');
+        rename.type = 'button';
+        rename.onclick = () => { renamingMeetings.set(meeting.id, meeting.title ?? ''); paint(); };
+        row.append(node('h2', meeting.title || 'Untitled meeting'), rename);
+        return;
+      }
+      const input = document.createElement('input');
+      input.className = 'title-input';
+      input.value = renamingMeetings.get(meeting.id);
+      input.maxLength = 200;
+      input.setAttribute('aria-label', 'Meeting title');
+      input.oninput = () => renamingMeetings.set(meeting.id, input.value);
+      const save = node('button', 'Save', 'title-action');
+      const cancel = node('button', 'Cancel', 'title-action secondary');
+      save.type = 'button';
+      cancel.type = 'button';
+      const finish = () => { renamingMeetings.delete(meeting.id); paint(); };
+      save.onclick = async () => {
+        const title = (renamingMeetings.get(meeting.id) ?? '').trim();
+        const status = document.querySelector('#form-result');
+        if (!title) { status.textContent = 'A meeting title is required.'; return; }
+        save.disabled = true;
+        cancel.disabled = true;
+        try {
+          const response = await fetch(`/api/meetings/${encodeURIComponent(meeting.id)}`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ title }),
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error ?? 'The meeting could not be renamed.');
+          renamingMeetings.delete(meeting.id);
+          status.textContent = 'Meeting renamed.';
+          await loadDashboard();
+        } catch (error) {
+          save.disabled = false;
+          cancel.disabled = false;
+          status.textContent = error.message;
+        }
+      };
+      cancel.onclick = finish;
+      input.onkeydown = (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); save.onclick(); }
+        if (event.key === 'Escape') { event.preventDefault(); finish(); }
+      };
+      row.append(input, save, cancel);
+      input.focus();
+      input.select();
+    };
+    paint();
+    return row;
+  }
+
+  function renderMeeting(meeting, transcript, artifacts, analysis, reviewEvents, tickets) {
     const card = node('article');
-    card.append(node('h2', meeting.title || 'Untitled meeting'), node('span', readable(meeting.status), 'badge'));
+    card.append(renderMeetingTitle(meeting), node('span', readable(meeting.status), 'badge'));
     if (meeting.isMock) card.append(node('span', ' Fixture data', 'badge mock'));
-    card.append(node('p', `${readable(meeting.meetingType)} · Bot ${meeting.botId ?? 'not assigned'}`, 'muted'));
+    if (meeting.source === 'manual') card.append(node('span', ' Manual transcript', 'badge mock'));
+    card.append(node('p', meeting.source === 'manual' ? `${readable(meeting.meetingType)} · local manual source` : `${readable(meeting.meetingType)} · Bot ${meeting.botId ?? 'not assigned'}`, 'muted'));
+    if (meeting.source === 'manual') {
+      const remove = node('button', 'Delete unreviewed manual meeting');
+      remove.type = 'button';
+      remove.onclick = async () => {
+        if (!window.confirm('Delete this unreviewed manual meeting and its local transcript?')) return;
+        const response = await fetch(`/api/manual-meetings/${encodeURIComponent(meeting.id)}`, { method: 'DELETE' });
+        const result = await response.json();
+        document.querySelector('#form-result').textContent = response.ok ? 'Manual meeting deleted.' : result.error;
+        await loadDashboard();
+      };
+      card.append(remove);
+    }
     if (meeting.error) card.append(node('p', `Error: ${meeting.error.message ?? meeting.error.subCode ?? meeting.error.code}`, 'error'));
     if (!meeting.isMock && meeting.recoveryActions?.length) {
       const actions = node('div', undefined, 'actions');
@@ -557,18 +1059,52 @@
     card.append(history);
     if (!transcript) card.append(node('p', `Transcript: ${readable(meeting.transcriptStatus)}`, 'muted'));
     if (transcript?.analytics) card.append(renderAnalytics(transcript.analytics));
+    else if (transcript?.source === 'manual') card.append(node('p', 'Talk-time analytics are unavailable because this manual transcript has no timestamps.', 'muted'));
     if (transcript?.status === 'done') {
-      const transcriptSection = node('section');
-      transcriptSection.append(node('h3', 'Normalized transcript'));
-      for (const utterance of transcript.utterances ?? transcript.paragraphs ?? []) {
+      const turnsData = transcript.utterances ?? transcript.paragraphs ?? [];
+      const transcriptSection = node('details', undefined, 'transcript-panel');
+      transcriptSection.id = `transcript-${meeting.id}`;
+      transcriptSection.dataset.meetingId = meeting.id;
+      transcriptSection.open = expandedTranscripts.has(meeting.id);
+      transcriptSection.ontoggle = () => {
+        if (transcriptSection.open) expandedTranscripts.add(meeting.id);
+        else expandedTranscripts.delete(meeting.id);
+      };
+      const summary = node('summary');
+      summary.append(node('h3', 'Normalized transcript'), node('span', `${turnsData.length} ${turnsData.length === 1 ? 'utterance' : 'utterances'}`, 'muted'));
+      transcriptSection.append(summary);
+      const turns = node('div', undefined, 'transcript-turns');
+      for (const utterance of turnsData) {
         const turn = node('div', undefined, 'turn');
         turn.id = `utterance-${utterance.id}`;
         turn.append(node('strong', utterance.speakerName ?? utterance.speaker), node('small', ` · ${timestamp(utterance.startTimestamp)}`), node('p', utterance.text));
-        transcriptSection.append(turn);
+        turns.append(turn);
       }
+      transcriptSection.append(turns);
       card.append(transcriptSection);
     }
-    if (analysis) card.append(node('p', `Groq analysis: ${readable(analysis.status)}`, analysis.status === 'failed' ? 'error' : 'muted'));
+    // Every failure is reported to the console even when the card stays quiet, so a suppressed
+    // result is still discoverable. Codes and field paths only; no transcript or context text.
+    if (analysis?.status === 'failed' && !loggedAnalysisFailures.has(analysis.id)) {
+      loggedAnalysisFailures.add(analysis.id);
+      console.warn('Groq analysis failed', {
+        meetingId: meeting.id,
+        analysisId: analysis.id,
+        code: analysis.error?.code ?? null,
+        issues: analysis.error?.issues ?? null,
+        structuredOutputMode: analysis.structuredOutputMode ?? null,
+        failedAt: analysis.updatedAt ?? analysis.createdAt,
+        displayed: analysisRequestedHere.has(meeting.id),
+      });
+    }
+    // Only report a run this page actually started. A stored result from an earlier session is
+    // history, not the state of this meeting, and rendering it surfaces an error nobody asked for.
+    if (analysis?.status === 'running') card.append(node('p', 'Groq analysis: running…', 'muted'));
+    else if (analysis && analysisRequestedHere.has(meeting.id)) {
+      const when = new Date(analysis.updatedAt ?? analysis.createdAt).toLocaleString();
+      if (analysis.status === 'failed') card.append(node('p', `Groq analysis failed — ${readable(analysis.error?.code ?? 'unknown error')} · ${when}`, 'error'));
+      else card.append(node('p', `Groq analysis: ${readable(analysis.status)} · ${when}`, 'muted'));
+    }
     if (artifacts.length) {
       const artifactSection = node('section');
       artifactSection.append(node('h3', 'AI-generated proposals'), node('p', 'Generated interpretation—review against the linked transcript evidence.', 'muted'));
@@ -587,14 +1123,24 @@
           const sourceList = node('ul');
           for (const source of artifact.contextProvenance.sources) {
             const location = source.sourcePath ? ` · ${source.sourcePath}${source.lineStart ? `:${source.lineStart}-${source.lineEnd}` : ''}` : '';
-            sourceList.append(node('li', `${source.label} · ${readable(source.kind)} · revision ${source.revision}${location}${source.truncated ? ' · truncated' : ''}`));
+            const item = node('li', `${source.label} · ${readable(source.kind)} · revision ${source.revision}${location}${source.truncated ? ' · truncated' : ''}`);
+            if (source.sourceUrl) {
+              const link = document.createElement('a');
+              link.href = source.sourceUrl;
+              link.target = '_blank';
+              link.rel = 'noopener noreferrer';
+              link.textContent = ' Open commit-pinned source';
+              item.append(link);
+            }
+            sourceList.append(item);
           }
           contextProvenance.append(sourceList);
         } else contextProvenance.append(node('p', 'No retrieved project context informed this proposal.', 'muted'));
         item.append(contextProvenance, node('h4', 'Transcript evidence'));
         const evidenceList = node('div', undefined, 'evidence-list');
         for (const evidence of artifact.evidence ?? []) {
-          const evidenceButton = node('button', `${evidence.speaker} at ${seconds(evidence.startTime)}: “${evidence.text}”`);
+          const evidenceTime = Number.isFinite(evidence.startTime) ? seconds(evidence.startTime) : 'time unavailable';
+          const evidenceButton = node('button', `${evidence.speaker} at ${evidenceTime}: “${evidence.text}”`);
           evidenceButton.type = 'button';
           evidenceButton.onclick = () => jumpToEvidence(evidence.utteranceId);
           evidenceList.append(evidenceButton);
@@ -626,6 +1172,18 @@
         restore.onclick = () => {
           if (window.confirm('Restore the original Groq proposal and reset its review state?')) runArtifactAction(artifact, 'restore');
         };
+        const sourceTicket = tickets.find((ticket) => ticket.sourceArtifactId === artifact.id && ticket.sourceArtifactVersion === (artifact.version ?? 1));
+        if (sourceTicket) {
+          const ticket = node('button', 'View local ticket');
+          ticket.type = 'button';
+          ticket.onclick = () => { activeWorkspaceTab = 'tickets'; setWorkspaceTab('tickets'); };
+          controls.append(ticket);
+        } else if (artifact.status === 'approved' && ['action_item', 'bug_report'].includes(artifact.type)) {
+          const ticket = node('button', 'Create local ticket');
+          ticket.type = 'button';
+          ticket.onclick = () => createLocalTicket(meeting, artifact);
+          controls.append(ticket);
+        }
         controls.append(edit, approve, reject, restore);
         item.append(controls);
         const history = reviewEvents.filter((event) => event.artifactId === artifact.id);
@@ -654,11 +1212,13 @@
     if (!projectsLoaded) await loadProjects();
     const response = await fetch('/api/dashboard');
     const dashboard = await response.json();
+    dashboardState = dashboard;
     const root = document.querySelector('#dashboard');
     const mode = document.querySelector('#mode');
     mode.textContent = dashboard.mockMode ? 'MOCK MODE' : 'LIVE MODE';
     mode.className = dashboard.mockMode ? 'badge mock' : 'badge';
     document.querySelector('#reset-demo').hidden = !dashboard.mockMode;
+    document.querySelector('#manual-transcript-section').hidden = !dashboard.manualTranscriptEnabled;
     root.replaceChildren();
     if (!dashboard.meetings?.length) root.append(node('p', 'No meetings have been scheduled yet.'));
     for (const meeting of dashboard.meetings ?? []) {
@@ -666,8 +1226,9 @@
       const artifacts = dashboard.artifacts?.filter((item) => item.meetingId === meeting.id) ?? [];
       const analysis = dashboard.analyses?.filter((item) => item.meetingId === meeting.id).sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
       const reviewEvents = dashboard.reviewEvents?.filter((event) => event.meetingId === meeting.id) ?? [];
-      root.append(renderMeeting(meeting, transcript, artifacts, analysis, reviewEvents));
+      root.append(renderMeeting(meeting, transcript, artifacts, analysis, reviewEvents, dashboard.tickets ?? []));
     }
+    setWorkspaceTab(activeWorkspaceTab);
   }
 
   async function loadProjects(force = false) {
@@ -684,19 +1245,79 @@
     }
     projectsLoaded = true;
     refreshProjectScanPicker();
+    refreshLocalRecapPicker();
+    document.querySelector('#local-recap-project').dispatchEvent(new Event('change'));
   }
 
   document.querySelector('#meeting-form').onsubmit = async (event) => {
     event.preventDefault();
     const form = new FormData(event.target);
     const joinAt = form.get('joinAt');
-    const response = await fetch('/api/meetings', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ meetingUrl: form.get('meetingUrl'), title: form.get('title'), meetingType: form.get('meetingType'), joinAt: joinAt ? new Date(joinAt).toISOString() : undefined }),
-    });
+    const submitButton = event.target.querySelector('button[type="submit"], button:not([type])');
+    submitButton.disabled = true;
+    try {
+      const response = await fetch('/api/meetings', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ meetingUrl: form.get('meetingUrl'), title: form.get('title'), meetingType: form.get('meetingType'), joinAt: joinAt ? new Date(joinAt).toISOString() : undefined }),
+      });
+      const result = await response.json();
+      document.querySelector('#form-result').textContent = response.ok ? (result.deduplicated ? 'An existing Recall bot is already scheduled for this meeting.' : 'Recall bot created.') : result.error;
+      await loadDashboard();
+    } finally {
+      submitButton.disabled = false;
+    }
+  };
+
+  document.querySelector('#manual-format').onchange = (event) => {
+    document.querySelector('#manual-default-speaker').hidden = event.target.value !== 'plain_paragraphs';
+    invalidateManualPreview();
+  };
+  document.querySelector('#manual-transcript-form').oninput = invalidateManualPreview;
+  document.querySelector('#load-manual-sample').onclick = () => {
+    const form = document.querySelector('#manual-transcript-form');
+    form.elements.title.value = 'Manual event-model architecture review';
+    form.elements.meetingType.value = 'architecture_review';
+    form.elements.format.value = 'timestamped_speaker_lines';
+    form.elements.text.value = manualSample;
+    document.querySelector('#manual-default-speaker').hidden = true;
+    document.querySelector('#manual-transcript-result').textContent = 'Sample loaded. Preview it before creating a meeting.';
+    invalidateManualPreview();
+  };
+  document.querySelector('#preview-manual-transcript').onclick = async () => {
+    const payload = manualTranscriptPayload();
+    const response = await fetch('/api/manual-transcripts/preview', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     const result = await response.json();
-    document.querySelector('#form-result').textContent = response.ok ? 'Recall bot created.' : result.error;
+    const status = document.querySelector('#manual-transcript-result');
+    if (!response.ok) {
+      status.textContent = `${result.error}${result.issues?.length ? ` ${result.issues.join('; ')}` : ''}`;
+      invalidateManualPreview();
+      return;
+    }
+    manualPreviewFingerprint = manualPayloadFingerprint(payload);
+    document.querySelector('#create-manual-meeting').disabled = false;
+    status.textContent = 'Preview is valid. Create the local meeting when ready.';
+    renderManualPreview(result.preview);
+  };
+  document.querySelector('#manual-transcript-form').onsubmit = async (event) => {
+    event.preventDefault();
+    const payload = manualTranscriptPayload();
+    const status = document.querySelector('#manual-transcript-result');
+    if (manualPreviewFingerprint !== manualPayloadFingerprint(payload)) {
+      status.textContent = 'Preview the current transcript before creating a meeting.';
+      invalidateManualPreview();
+      return;
+    }
+    const response = await fetch('/api/manual-meetings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    const result = await response.json();
+    if (!response.ok) {
+      status.textContent = `${result.error}${result.issues?.length ? ` ${result.issues.join('; ')}` : ''}`;
+      return;
+    }
+    event.target.reset();
+    document.querySelector('#manual-transcript-preview').replaceChildren();
+    status.textContent = 'Manual meeting created. You can now preview context or run the existing analysis flow.';
+    invalidateManualPreview();
     await loadDashboard();
   };
 
@@ -718,6 +1339,11 @@
       await loadProjects(true);
       document.querySelector('#scan-project').value = result.project.id;
     }
+  };
+
+  document.querySelector('#recall-workflow-toggle').onclick = () => {
+    recallWorkflowVisible = !recallWorkflowVisible;
+    syncWorkflowVisibility();
   };
 
   document.querySelector('#scan-project-button').onclick = async () => {
@@ -748,7 +1374,12 @@
     }
   };
 
+  document.querySelector('#meetings-tab-button').onclick = () => setWorkspaceTab('meetings');
+  document.querySelector('#tickets-tab-button').onclick = () => setWorkspaceTab('tickets');
+  syncWorkflowVisibility();
   loadDashboard();
+  setupLocalRecapWorkspace();
+  // Polling keeps this dependency-free UI current after asynchronous Recall webhooks, but never overwrites active edits.
   setInterval(() => {
     const hasUnsavedDashboardInput = document.querySelector('.editor')
       || document.querySelector('.export-panel[data-dirty="true"]')

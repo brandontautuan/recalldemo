@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { createConfig } from '../src/config.js';
-import { createApp, eligibleCalendarEvent } from '../src/app.js';
+import { createApp, directMeetingSchedulingKey, eligibleCalendarEvent } from '../src/app.js';
 import { RecallClient } from '../src/recall-client.js';
 import { calculateMeetingAnalytics, normalizeTranscript } from '../src/transcript.js';
 import { mockFixture } from '../src/mock-data.js';
@@ -25,6 +25,9 @@ test('configuration permits only Groq strict-output models and bounded concurren
   const config = createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', GROQ_MODEL: 'openai/gpt-oss-120b', GROQ_MAX_CONCURRENCY: '2' });
   assert.equal(config.groqModel, 'openai/gpt-oss-120b');
   assert.equal(config.groqMaximumConcurrency, 2);
+  assert.equal(config.groqReasoningEffort, 'low');
+  assert.throws(() => createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', GROQ_REASONING_EFFORT: 'none' }), /low, medium, or high/);
+  assert.equal(createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', GROQ_REASONING_EFFORT: 'medium' }).groqReasoningEffort, 'medium');
 });
 test('configuration validates bounded project-context storage settings', () => {
   const config = createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true', DATABASE_PATH: 'data/context.sqlite', PROJECT_CONTEXT_SEED_PATH: 'seeds/context.json', PROJECT_CONTEXT_MAX_CHARACTERS: '12000' });
@@ -95,6 +98,7 @@ class MemoryStore {
   getMeeting(id) { return this.meetings.get(id) ?? null; }
   updateMeeting(id, patch) { const value = Object.assign(this.meetings.get(id), patch); return value; }
   findMeetingByBotId(botId) { return [...this.meetings.values()].find((meeting) => meeting.botId === botId) ?? null; }
+  findMeetingBySchedulingKey(schedulingKey) { return [...this.meetings.values()].find((meeting) => meeting.schedulingKey === schedulingKey) ?? null; }
   findTranscriptByMeetingId(meetingId) { return [...this.transcripts.values()].find((transcript) => transcript.meetingId === meetingId) ?? null; }
   recordLifecycle() {}
   rememberEvent() {}
@@ -181,6 +185,58 @@ test('runs Groq analysis only through the explicit manual endpoint and persists 
   assert.equal(store.getMeeting('meeting-1').analysisStatus, 'complete');
 });
 
+test('a failed manual analysis records the validation issues and the structured-output mode that produced them', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'manual-analysis-failure-test-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = new JsonStore(path.join(directory, 'store.json'));
+  store.addMeeting({ id: 'meeting-1', title: 'Migration review', meetingType: 'architecture_review', participants: [{ id: '1', name: 'Ada' }], analysisStatus: 'not_started', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
+  store.saveTranscript('transcript-1', { id: 'transcript-1', meetingId: 'meeting-1', status: 'done', utterances: [{ id: 'utterance-1', speakerId: '1', speakerName: 'Ada', text: 'I will document the migration plan.', startTimestamp: { relative: 3 }, endTimestamp: { relative: 6 } }] });
+  const analysis = { async analyze() {
+    return { model: 'openai/gpt-oss-20b', usage: null, rateLimit: {}, structuredOutputMode: 'json_object_fallback', output: { artifacts: [{
+      type: 'action_item', title: 'Document the migration plan', status: 'proposed', description: 'Write the event-model migration and its acceptance checks.', context: null, decision: null,
+      alternativesRejected: [], consequences: [], assignee: 'Ada', dueDate: null, acceptanceCriteria: [{ criterion: 'ambiguous', note: 'two string values' }], priority: 'medium',
+      stepsToReproduce: [], expectedBehavior: null, actualBehavior: null, severity: null, impact: null, mitigation: null, owner: null, question: null, suggestedOwner: null,
+      summary: null, problem: null, whyItMatters: null, proposedImplementationAreas: [], dependencies: [], risks: [], openQuestions: [],
+      repositoryReferences: [],
+      evidenceUtteranceIds: ['utterance-1'], contextSourceIds: [], confidence: 'high',
+    }] } };
+  } };
+  const logged = [];
+  const app = createApp({ config: createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true' }), recall: {}, analysis, store, logger: { error(event, detail) { logged.push({ event, detail }); } } });
+  const response = await invoke(app, 'POST', '/api/meetings/meeting-1/analyze');
+  assert.equal(response.statusCode, 422);
+  assert.deepEqual(JSON.parse(response.body).issues, ['artifacts[0].acceptanceCriteria must be a string array']);
+  const record = store.latestAnalysis('meeting-1');
+  assert.equal(record.status, 'failed');
+  assert.equal(record.structuredOutputMode, 'json_object_fallback');
+  assert.deepEqual(record.error, { code: 'invalid_output', issues: ['artifacts[0].acceptanceCriteria must be a string array'] });
+  const failure = logged.find((entry) => entry.event === 'manual-groq-analysis-failed');
+  assert.deepEqual(failure.detail.issues, ['artifacts[0].acceptanceCriteria must be a string array']);
+  assert.equal(failure.detail.structuredOutputMode, 'json_object_fallback');
+});
+
+test('a meeting can be renamed and the new title is persisted', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'meeting-rename-test-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = new JsonStore(path.join(directory, 'store.json'));
+  store.addMeeting({ id: 'meeting-1', title: 'Untitled meeting', meetingType: 'architecture_review', status: 'completed', participants: [], createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
+  const app = createApp({ config: createConfig({ RECALL_REGION: 'us-west-2', MOCK_MODE: 'true' }), recall: {}, store, logger: { error() {} } });
+
+  const renamed = await invoke(app, 'PATCH', '/api/meetings/meeting-1', JSON.stringify({ title: '  Resident-call flow review  ' }));
+  assert.equal(renamed.statusCode, 200);
+  assert.equal(JSON.parse(renamed.body).title, 'Resident-call flow review');
+  // Persisted, not just echoed back.
+  assert.equal(new JsonStore(path.join(directory, 'store.json')).getMeeting('meeting-1').title, 'Resident-call flow review');
+
+  assert.equal((await invoke(app, 'PATCH', '/api/meetings/missing', JSON.stringify({ title: 'x' }))).statusCode, 404);
+  assert.equal((await invoke(app, 'PATCH', '/api/meetings/meeting-1', JSON.stringify({ title: '   ' }))).statusCode, 400);
+  assert.equal((await invoke(app, 'PATCH', '/api/meetings/meeting-1', JSON.stringify({ title: 'a'.repeat(201) }))).statusCode, 400);
+  assert.equal((await invoke(app, 'PATCH', '/api/meetings/meeting-1', JSON.stringify({ title: 'ok', status: 'failed' }))).statusCode, 400);
+  assert.equal((await invoke(app, 'PATCH', '/api/meetings/meeting-1', 'not json')).statusCode, 400);
+  // A rejected rename leaves the stored title alone.
+  assert.equal(store.getMeeting('meeting-1').title, 'Resident-call flow review');
+});
+
 test('manual analysis requires a completed transcript', async (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'manual-analysis-input-test-'));
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -236,6 +292,67 @@ test('future Recall bot creation enters the canonical scheduled state', async (c
   assert.equal(response.statusCode, 201);
   assert.equal(meeting.status, 'bot_scheduled');
   assert.equal(meeting.statusHistory.at(-1).eventType, 'app.bot_scheduled');
+});
+
+test('deduplicates direct bot creation by canonical meeting URL and join time', async () => {
+  const config = createConfig({ RECALL_REGION: 'us-west-2', RECALL_API_KEY: 'token', RECALL_WEBHOOK_VERIFICATION_SECRET: secret, PUBLIC_API_BASE_URL: 'https://recall-demo.ngrok.app' });
+  const store = new MemoryStore();
+  const createCalls = [];
+  const app = createApp({ config, store, recall: { async createBot(request) { createCalls.push(request); return { id: 'bot-123' }; } } });
+  const joinAt = '2099-01-01T00:00:00.000Z';
+  const first = await invoke(app, 'POST', '/api/meetings', JSON.stringify({ meetingUrl: 'https://MEET.google.com/abc-defg-hij/?b=2&a=1#ignored', joinAt }));
+  const second = await invoke(app, 'POST', '/api/meetings', JSON.stringify({ meetingUrl: 'https://meet.google.com/abc-defg-hij?a=1&b=2', joinAt }));
+  const firstMeeting = JSON.parse(first.body);
+  const secondMeeting = JSON.parse(second.body);
+  assert.equal(first.statusCode, 201);
+  assert.equal(second.statusCode, 200);
+  assert.equal(secondMeeting.id, firstMeeting.id);
+  assert.equal(secondMeeting.deduplicated, true);
+  assert.equal(createCalls.length, 1);
+  assert.equal(createCalls[0].schedulingKey, directMeetingSchedulingKey({ meetingUrl: firstMeeting.meetingUrl, joinAt }));
+});
+
+test('does not recreate a bot after an ambiguous duplicate creation failure', async () => {
+  const config = createConfig({ RECALL_REGION: 'us-west-2', RECALL_API_KEY: 'token', RECALL_WEBHOOK_VERIFICATION_SECRET: secret, PUBLIC_API_BASE_URL: 'https://recall-demo.ngrok.app' });
+  const store = new MemoryStore();
+  let createCalls = 0;
+  const app = createApp({ config, store, logger: { error() {} }, recall: { async createBot() { createCalls += 1; throw new Error('unavailable'); } } });
+  const body = JSON.stringify({ meetingUrl: 'https://zoom.us/j/123456789', joinAt: '2099-01-01T00:00:00.000Z' });
+  assert.equal((await invoke(app, 'POST', '/api/meetings', body)).statusCode, 502);
+  const duplicate = await invoke(app, 'POST', '/api/meetings', body);
+  assert.equal(duplicate.statusCode, 409);
+  assert.equal(createCalls, 1);
+});
+
+test('rejects a past direct bot join time before calling Recall', async () => {
+  const config = createConfig({ RECALL_REGION: 'us-west-2', RECALL_API_KEY: 'token', RECALL_WEBHOOK_VERIFICATION_SECRET: secret, PUBLIC_API_BASE_URL: 'https://recall-demo.ngrok.app' });
+  const store = new MemoryStore();
+  let createCalls = 0;
+  const app = createApp({ config, store, recall: { async createBot() { createCalls += 1; } } });
+  const response = await invoke(app, 'POST', '/api/meetings', JSON.stringify({ meetingUrl: 'https://meet.google.com/abc-defg-hij', joinAt: '2020-01-01T00:00:00.000Z' }));
+  assert.equal(response.statusCode, 400);
+  assert.match(JSON.parse(response.body).error, /must not be in the past/);
+  assert.equal(createCalls, 0);
+  assert.equal(store.meetings.size, 0);
+});
+
+test('recovers an ambiguous creation failure when a Recall lifecycle webhook identifies the bot', async (context) => {
+  const config = createConfig({ RECALL_REGION: 'us-west-2', RECALL_API_KEY: 'token', RECALL_WEBHOOK_VERIFICATION_SECRET: secret, PUBLIC_API_BASE_URL: 'https://recall-demo.ngrok.app' });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ambiguous-create-test-'));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = new JsonStore(path.join(directory, 'store.json'));
+  const app = createApp({ config, store, logger: { error() {} }, recall: { async createBot() { throw new Error('response lost'); } } });
+  const body = JSON.stringify({ meetingUrl: 'https://zoom.us/j/123456789', joinAt: '2099-01-01T00:00:00.000Z' });
+  const failed = JSON.parse((await invoke(app, 'POST', '/api/meetings', body)).body);
+  const webhook = await invokeWebhook(app, {
+    event: 'bot.joining_call',
+    data: { bot: { id: 'bot-created-remotely', metadata: { scheduling_intent_id: failed.id } }, data: { updated_at: '2099-01-01T00:00:01.000Z' } },
+  }, 'ambiguous-create-webhook');
+  assert.equal(webhook.statusCode, 202);
+  const recovered = store.getMeeting(failed.id);
+  assert.equal(recovered.botId, 'bot-created-remotely');
+  assert.equal(recovered.status, 'joining');
+  assert.equal(recovered.error, null);
 });
 
 test('rejects unsupported meeting URLs before calling Recall', async () => {

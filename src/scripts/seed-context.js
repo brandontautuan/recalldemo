@@ -1,3 +1,4 @@
+/** Deliberate CLI entry point for validating and importing the reviewed project-context seed corpus. */
 import { ProjectContextStore } from '../context-db.js';
 import { loadSeedManifest } from '../context-seed.js';
 
